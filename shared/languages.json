@@ -1,0 +1,12 @@
+[
+  {"code":"en","name":"English","native":"English","whisper_code":"en","speech_tag":"en-US","api_enabled":true},
+  {"code":"hi","name":"Hindi","native":"हिन्दी","whisper_code":"hi","speech_tag":"hi-IN","api_enabled":true},
+  {"code":"mr","name":"Marathi","native":"मराठी","whisper_code":"mr","speech_tag":"mr-IN","api_enabled":true},
+  {"code":"es","name":"Spanish","native":"Español","whisper_code":"es","speech_tag":"es-ES","api_enabled":true},
+  {"code":"de","name":"German","native":"Deutsch","whisper_code":"de","speech_tag":"de-DE","api_enabled":true},
+  {"code":"fr","name":"French","native":"Français","whisper_code":"fr","speech_tag":"fr-FR","api_enabled":true},
+  {"code":"ja","name":"Japanese","native":"日本語","whisper_code":"ja","speech_tag":"ja-JP","api_enabled":true},
+  {"code":"ru","name":"Russian","native":"Русский","whisper_code":"ru","speech_tag":"ru-RU","api_enabled":true},
+  {"code":"zh-CN","name":"Chinese (Mandarin)","native":"普通话","whisper_code":"zh","speech_tag":"zh-CN","api_enabled":true},
+  {"code":"ko","name":"Korean","native":"한국어","whisper_code":"ko","speech_tag":"ko-KR","api_enabled":true}
+]

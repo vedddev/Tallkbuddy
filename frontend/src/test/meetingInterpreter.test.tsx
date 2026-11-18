@@ -1,0 +1,165 @@
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, expect, it, vi } from 'vitest'
+import { MemoryRouter } from 'react-router-dom'
+import { MeetingInterpreter } from '../components/MeetingInterpreter'
+import * as meetingAudio from '../lib/meetingAudio'
+import { TranslationSocket } from '../lib/socket'
+import { languageRegistry } from '../lib/languageRegistry'
+
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
+
+it('asks for tab capture from Start and shows a useful permission error', async () => {
+  const getDisplayMedia = vi.fn().mockRejectedValue(new DOMException('denied', 'NotAllowedError'))
+  Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getDisplayMedia } })
+  render(<MemoryRouter><MeetingInterpreter preferences={null} microphoneActive={false} onActiveChange={vi.fn()} /></MemoryRouter>)
+  fireEvent.click(screen.getByRole('button', { name: 'Start interpretation' }))
+  await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Tab sharing was denied'))
+  expect(getDisplayMedia).toHaveBeenCalledOnce()
+  expect(getDisplayMedia).toHaveBeenCalledWith(expect.objectContaining({ video: expect.any(Object), audio: expect.any(Object) }))
+})
+
+it('keeps the selected language and sends it through the WebSocket configuration', async () => {
+  vi.spyOn(meetingAudio, 'startMeetingCapture').mockResolvedValue({
+    pause: vi.fn(), resume: vi.fn(), stop: vi.fn().mockResolvedValue(undefined),
+    setOriginalMuted: vi.fn().mockResolvedValue(true), originalMuteSupported: true,
+  })
+  const connect = vi.spyOn(TranslationSocket.prototype, 'connect').mockResolvedValue(undefined)
+  render(<MemoryRouter><MeetingInterpreter preferences={null} microphoneActive={false} onActiveChange={vi.fn()} /></MemoryRouter>)
+  const target = screen.getByLabelText('Interpret') as HTMLSelectElement
+  const options = Array.from(target.options).filter((option) => option.value !== 'auto')
+  expect(options.map((option) => option.value)).toEqual(languageRegistry.map((entry) => entry.code))
+  expect(options.every((option) => !option.disabled)).toBe(true)
+  fireEvent.change(target, { target: { value: 'zh-CN' } })
+  fireEvent.change(screen.getByLabelText('Meeting language'), { target: { value: 'auto' } })
+  expect(target.value).toBe('zh-CN')
+  fireEvent.click(screen.getByRole('button', { name: 'Start interpretation' }))
+  await waitFor(() => expect(connect).toHaveBeenCalledOnce())
+  expect(connect.mock.calls[0][0]).toMatchObject({ target_language: 'zh-CN', source_language: 'auto' })
+})
+
+it('keeps translated captions visible when the selected browser voice is missing', async () => {
+  vi.spyOn(meetingAudio, 'startMeetingCapture').mockResolvedValue({
+    pause: vi.fn(), resume: vi.fn(), stop: vi.fn().mockResolvedValue(undefined),
+    setOriginalMuted: vi.fn().mockResolvedValue(true), originalMuteSupported: true,
+  })
+  Object.assign(window.speechSynthesis, { getVoices: () => [], pause: vi.fn(), resume: vi.fn() })
+  class FakeWebSocket {
+    static OPEN = 1
+    static latest: FakeWebSocket
+    readyState = 0
+    onopen: (() => void) | null = null
+    onmessage: ((event: { data: string }) => void) | null = null
+    onclose: ((event: { code: number }) => void) | null = null
+    onerror: (() => void) | null = null
+    constructor(_url: string) { FakeWebSocket.latest = this }
+    send(_payload: string | ArrayBuffer) {}
+    close() { this.readyState = 3; this.onclose?.({ code: 1000 }) }
+    open() { this.readyState = 1; this.onopen?.() }
+    receive(message: object) { this.onmessage?.({ data: JSON.stringify(message) }) }
+  }
+  vi.stubGlobal('WebSocket', FakeWebSocket)
+  render(<MemoryRouter><MeetingInterpreter preferences={null} microphoneActive={false} onActiveChange={vi.fn()} /></MemoryRouter>)
+  fireEvent.change(screen.getByLabelText('Interpret'), { target: { value: 'ja' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Start interpretation' }))
+  await waitFor(() => expect(FakeWebSocket.latest).toBeDefined())
+  await act(async () => {
+    FakeWebSocket.latest.open()
+    FakeWebSocket.latest.receive({ type: 'ready', target_language: 'ja', source_language: 'en', audio_format: 'wav' })
+  })
+  await waitFor(() => expect(screen.getByText('Listening')).toBeInTheDocument())
+  act(() => FakeWebSocket.latest.receive({ type: 'processing', chunk_id: 1 }))
+  expect(screen.getByRole('status', { name: 'Processing' })).toBeInTheDocument()
+  const longTranslation = 'おはようございます。'.repeat(50)
+  const longOriginal = '这是一个完整的句子。'.repeat(50)
+  act(() => FakeWebSocket.latest.receive({
+    type: 'result', chunk_id: 1, original: longOriginal, translated: longTranslation,
+    detected_language: 'en', target_language: 'ja', processing_time_ms: 20,
+  }))
+  expect(screen.getByText(longTranslation)).toHaveClass('break-words')
+  expect(screen.getByText(longOriginal)).toBeInTheDocument()
+  expect(screen.getAllByText(/Received /)).toHaveLength(2)
+  expect(screen.getByText(/No Japanese voice is available/)).toBeInTheDocument()
+  expect(screen.getByRole('status', { name: 'Listening' })).toBeInTheDocument()
+  const translatedList = screen.getByRole('list', { name: 'Translated speech' })
+  Object.defineProperty(translatedList, 'scrollHeight', { configurable: true, value: 1000 })
+  Object.defineProperty(translatedList, 'clientHeight', { configurable: true, value: 200 })
+  translatedList.scrollTop = 100
+  fireEvent.scroll(translatedList)
+  act(() => FakeWebSocket.latest.receive({ type: 'result', chunk_id: 2, original: 'Thank you', translated: 'ありがとうございます', detected_language: 'en', target_language: 'ja', processing_time_ms: 20 }))
+  expect(translatedList.scrollTop).toBe(100)
+  await act(async () => FakeWebSocket.latest.receive({ type: 'error', code: 'provider_unavailable', message: 'AI service failed', recoverable: false }))
+  expect(screen.getByRole('alert')).toHaveTextContent('AI translation is temporarily unavailable')
+  expect(screen.getByRole('status', { name: 'Error' })).toBeInTheDocument()
+  expect(screen.getByText(longTranslation)).toBeInTheDocument()
+})
+
+it('shares a tab first, then starts, pauses, resumes, and stops without duplicate starts', async () => {
+  const capture = {
+    pause: vi.fn(), resume: vi.fn(), stop: vi.fn().mockResolvedValue(undefined),
+    setOriginalMuted: vi.fn().mockResolvedValue(true), originalMuteSupported: true,
+  }
+  vi.spyOn(meetingAudio, 'startMeetingCapture').mockResolvedValue(capture)
+  const connect = vi.spyOn(TranslationSocket.prototype, 'connect').mockResolvedValue(undefined)
+  vi.spyOn(TranslationSocket.prototype, 'stop').mockResolvedValue(undefined)
+  render(<MemoryRouter><MeetingInterpreter preferences={null} microphoneActive={false} onActiveChange={vi.fn()} /></MemoryRouter>)
+  fireEvent.click(screen.getByRole('button', { name: 'Share browser tab with audio' }))
+  await waitFor(() => expect(screen.getByRole('status', { name: 'Tab shared' })).toBeInTheDocument())
+  expect(connect).not.toHaveBeenCalled()
+  fireEvent.change(screen.getByLabelText('Interpret'), { target: { value: 'mr' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Start interpretation' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Start interpretation' }))
+  await waitFor(() => expect(screen.getByRole('status', { name: 'Listening' })).toBeInTheDocument())
+  expect(connect).toHaveBeenCalledTimes(1)
+  expect(connect.mock.calls[0][0].target_language).toBe('mr')
+  expect(screen.getByLabelText('Interpret')).toBeDisabled()
+  expect(capture.resume).toHaveBeenCalledOnce()
+  fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
+  expect(screen.getByRole('status', { name: 'Paused' })).toBeInTheDocument()
+  expect(capture.pause).toHaveBeenCalledOnce()
+  fireEvent.click(screen.getByRole('button', { name: 'Resume' }))
+  expect(capture.resume).toHaveBeenCalledTimes(2)
+  fireEvent.click(screen.getByRole('button', { name: 'Stop session' }))
+  await waitFor(() => expect(capture.stop).toHaveBeenCalledOnce())
+  expect(screen.getByRole('status', { name: 'Idle' })).toBeInTheDocument()
+})
+
+it('shows missing tab audio and connection failures while cleaning up capture', async () => {
+  const capture = { pause: vi.fn(), resume: vi.fn(), stop: vi.fn().mockResolvedValue(undefined), setOriginalMuted: vi.fn().mockResolvedValue(true), originalMuteSupported: true }
+  const startCapture = vi.spyOn(meetingAudio, 'startMeetingCapture').mockRejectedValueOnce(new Error('No tab audio was shared. Select a browser tab and enable Share tab audio.')).mockResolvedValue(capture)
+  vi.spyOn(TranslationSocket.prototype, 'connect').mockRejectedValue(new Error('Unable to connect to translation. Check that the backend is running.'))
+  render(<MemoryRouter><MeetingInterpreter preferences={null} microphoneActive={false} onActiveChange={vi.fn()} /></MemoryRouter>)
+  fireEvent.click(screen.getByRole('button', { name: 'Start interpretation' }))
+  await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('No tab audio was shared'))
+  fireEvent.click(screen.getByRole('button', { name: 'Start interpretation' }))
+  await waitFor(() => expect(startCapture).toHaveBeenCalledTimes(2))
+  await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Unable to connect to translation'))
+  expect(capture.stop).toHaveBeenCalledOnce()
+  expect(screen.getByRole('status', { name: 'Error' })).toBeInTheDocument()
+})
+
+it('shows permission-request state and a specific session authentication failure', async () => {
+  let grant!: (capture: meetingAudio.MeetingCapture) => void
+  const capture = { pause: vi.fn(), resume: vi.fn(), stop: vi.fn().mockResolvedValue(undefined), setOriginalMuted: vi.fn().mockResolvedValue(true), originalMuteSupported: true }
+  vi.spyOn(meetingAudio, 'startMeetingCapture').mockReturnValue(new Promise((resolve) => { grant = resolve }))
+  vi.spyOn(TranslationSocket.prototype, 'connect').mockRejectedValue(new Error('Your session expired. Sign in again.'))
+  render(<MemoryRouter><MeetingInterpreter preferences={null} microphoneActive={false} onActiveChange={vi.fn()} /></MemoryRouter>)
+  fireEvent.click(screen.getByRole('button', { name: 'Start interpretation' }))
+  expect(screen.getByRole('status', { name: 'Requesting tab permission' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Start interpretation' })).toBeDisabled()
+  await act(async () => grant(capture))
+  await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Your session expired'))
+  expect(capture.stop).toHaveBeenCalledOnce()
+})
+
+it('warns when original-tab muting is unsupported and keeps captions mode available', async () => {
+  vi.spyOn(meetingAudio, 'startMeetingCapture').mockResolvedValue({
+    pause: vi.fn(), resume: vi.fn(), stop: vi.fn().mockResolvedValue(undefined),
+    setOriginalMuted: vi.fn().mockResolvedValue(false), originalMuteSupported: false,
+  })
+  render(<MemoryRouter><MeetingInterpreter preferences={null} microphoneActive={false} onActiveChange={vi.fn()} /></MemoryRouter>)
+  fireEvent.click(screen.getByRole('checkbox', { name: /Mute original tab audio/ }))
+  fireEvent.click(screen.getByRole('button', { name: 'Share browser tab with audio' }))
+  await waitFor(() => expect(screen.getByText(/cannot mute the source tab/)).toBeInTheDocument())
+  expect(screen.getByRole('checkbox', { name: /Mute original tab audio/ })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Start interpretation' })).toBeEnabled()
+})
