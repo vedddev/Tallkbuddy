@@ -125,10 +125,16 @@ def play_wav(path: str | Path, device: AudioDevice, config: BridgeConfig | None 
     try:
         backend.play(data, samplerate=output_rate, device=device.index, blocking=True)
     except KeyboardInterrupt as exc:
-        backend.stop()
         raise PlaybackError("Playback interrupted.") from exc
     except Exception as exc:
         raise PlaybackError("Audio playback failed. Check whether the selected device is connected and available.") from exc
+    finally:
+        stop = getattr(backend, "stop", None)
+        if callable(stop):
+            try:
+                stop()
+            except Exception:
+                pass
     return audio
 
 

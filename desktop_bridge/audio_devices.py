@@ -15,6 +15,7 @@ class AudioDevice:
     input_channels: int
     output_channels: int
     default_samplerate: int
+    host_api: str = "Unknown"
 
     @property
     def cable_input(self) -> bool:
@@ -37,8 +38,15 @@ def list_devices(backend: Any | None = None) -> list[AudioDevice]:
     backend = backend or sounddevice_backend()
     try:
         raw_devices = backend.query_devices()
+        host_apis = backend.query_hostapis() if hasattr(backend, "query_hostapis") else []
     except Exception as exc:
         raise DeviceError("Windows audio devices could not be queried. Check the audio service and device drivers.") from exc
+
+    def host_name(raw: Any) -> str:
+        index = raw.get("hostapi")
+        if isinstance(index, int) and 0 <= index < len(host_apis):
+            return str(host_apis[index].get("name", "Unknown"))
+        return "Unknown"
     return [
         AudioDevice(
             index=index,
@@ -46,6 +54,7 @@ def list_devices(backend: Any | None = None) -> list[AudioDevice]:
             input_channels=int(raw["max_input_channels"]),
             output_channels=int(raw["max_output_channels"]),
             default_samplerate=int(round(float(raw["default_samplerate"]))),
+            host_api=host_name(raw),
         )
         for index, raw in enumerate(raw_devices)
     ]
@@ -56,9 +65,7 @@ def select_output_device(devices: list[AudioDevice], selector: str | int | None 
     if not outputs:
         raise DeviceError("No Windows playback devices are available.")
     if selector is None or str(selector).strip() == "":
-        matches = [device for device in outputs if device.cable_input]
-        if not matches:
-            raise DeviceError("VB-CABLE playback device 'CABLE Input' was not found. Install VB-CABLE or pass --device.")
+        raise DeviceError("Select a playback device explicitly with --device INDEX. Use 'devices' to find CABLE Input.")
     elif str(selector).strip().isdigit():
         index = int(str(selector).strip())
         matches = [device for device in outputs if device.index == index]
@@ -75,10 +82,29 @@ def select_output_device(devices: list[AudioDevice], selector: str | int | None 
     return matches[0]
 
 
+def select_input_device(devices: list[AudioDevice], selector: str | int) -> AudioDevice:
+    """Select a recording source by exact index or unique name fragment."""
+
+    inputs = [device for device in devices if device.input_channels > 0]
+    value = str(selector).strip()
+    if not value:
+        raise DeviceError("Choose a recording source with --input INDEX. Use 'devices' to list CABLE Output.")
+    if value.isdigit():
+        matches = [device for device in inputs if device.index == int(value)]
+    else:
+        matches = [device for device in inputs if value.casefold() in device.name.casefold()]
+    if not matches:
+        raise DeviceError(f"Device '{value}' is not an available recording source. Select CABLE Output from 'devices'.")
+    if len(matches) > 1:
+        indices = ", ".join(str(device.index) for device in matches)
+        raise DeviceError(f"Multiple recording sources match ({indices}). Choose one with --input INDEX.")
+    return matches[0]
+
+
 def format_device(device: AudioDevice) -> str:
     role = "CABLE Input playback" if device.cable_input else "CABLE Output recording" if device.cable_output else ""
     return (
         f"{device.index:>3}  {device.name}  "
-        f"[in={device.input_channels}, out={device.output_channels}, default={device.default_samplerate} Hz]"
+        f"[in={device.input_channels}, out={device.output_channels}, default={device.default_samplerate} Hz, host={device.host_api}]"
         f"{'  <-- ' + role if role else ''}"
     )

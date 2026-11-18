@@ -112,3 +112,21 @@ def test_invalid_wav_and_unavailable_output_are_reported(tmp_path: Path) -> None
             raise RuntimeError("unavailable")
     with pytest.raises(PlaybackError, match="No compatible sample rate"):
         play_wav(valid, cable, backend=UnavailableBackend())
+
+
+def test_playback_failure_stops_the_device_and_hides_driver_details(tmp_path: Path) -> None:
+    path = tmp_path / "spoken.wav"
+    make_wav(path, 2, 1, [1000, -1000] * 200)
+    class FailingBackend:
+        stopped = False
+        def check_output_settings(self, **_kwargs):
+            pass
+        def play(self, *_args, **_kwargs):
+            raise RuntimeError("private driver detail")
+        def stop(self):
+            self.stopped = True
+    backend = FailingBackend()
+    with pytest.raises(PlaybackError, match="Audio playback failed") as failure:
+        play_wav(path, AudioDevice(7, "CABLE Input", 0, 2, 48000), backend=backend)
+    assert "private driver detail" not in str(failure.value)
+    assert backend.stopped
