@@ -59,6 +59,33 @@ describe('translation socket protocol', () => {
     expect(messages.filter((message) => message.type === 'result')).toHaveLength(2)
   })
 
+  it('associates local send/receive timing with the correct queued phrase', async () => {
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const onMessage = vi.fn()
+    const socket = new TranslationSocket({ onMessage, onClose: vi.fn(), onDrop: vi.fn() })
+    const connected = socket.connect({ source_language: 'auto', target_language: 'fr', save_history: false })
+    const transport = FakeWebSocket.instance
+    transport.open()
+    transport.receive({ type: 'ready', target_language: 'fr', source_language: null, audio_format: 'wav' })
+    await connected
+    const clock = vi.spyOn(performance, 'now')
+    clock.mockReturnValue(100)
+    socket.sendAudio(new ArrayBuffer(44), { speechEndAtMs: 40, captureDurationMs: 1000 })
+    socket.sendAudio(new ArrayBuffer(46), { speechEndAtMs: 80, captureDurationMs: 900 })
+    clock.mockReturnValue(220)
+    transport.receive({ type: 'result', chunk_id: 1, original: 'One', translated: 'Un', target_language: 'fr', detected_language: 'en', processing_time_ms: 100 })
+    expect(onMessage).toHaveBeenLastCalledWith(expect.objectContaining({ chunk_id: 1 }), {
+      submittedAtMs: 100, receivedAtMs: 220, capture: { speechEndAtMs: 40, captureDurationMs: 1000 },
+    })
+    clock.mockReturnValue(310)
+    transport.receive({ type: 'result', chunk_id: 2, original: 'Two', translated: 'Deux', target_language: 'fr', detected_language: 'en', processing_time_ms: 80 })
+    expect(onMessage).toHaveBeenLastCalledWith(expect.objectContaining({ chunk_id: 2 }), {
+      submittedAtMs: 220, receivedAtMs: 310, capture: { speechEndAtMs: 80, captureDurationMs: 900 },
+    })
+    clock.mockRestore()
+    socket.close()
+  })
+
   it('requires ready and surfaces a failed handshake', async () => {
     vi.stubGlobal('WebSocket', FakeWebSocket)
     const socket = new TranslationSocket({ onMessage: vi.fn(), onClose: vi.fn(), onDrop: vi.fn() })

@@ -1,4 +1,5 @@
 import { captureWorkletCode, encodePcmWav } from './audio'
+import type { CaptureTiming } from './latency'
 
 const OUTPUT_RATE = 16_000
 const MAX_WAV_BYTES = 1_000_000
@@ -16,7 +17,7 @@ export class PhraseSegmenter {
 
   constructor(
     private sampleRate: number,
-    private onPhrase: (samples: Float32Array) => void,
+    private onPhrase: (samples: Float32Array, timing: CaptureTiming) => void,
     private onDrop: () => void = () => undefined,
   ) {}
 
@@ -77,6 +78,9 @@ export class PhraseSegmenter {
 
   private finish(): void {
     if (this.voicedSamples < this.sampleRate * 0.6) { this.reset(); return }
+    // The phrase boundary is detected after trailing silence. Estimate the
+    // speech end on this browser's monotonic clock without changing VAD.
+    const speechEndAtMs = performance.now() - this.trailingSilence / this.sampleRate * 1000
     const keep = Math.min(this.segmentSamples, this.segmentSamples - this.trailingSilence + Math.floor(this.sampleRate * 0.15))
     const joined = new Float32Array(keep)
     let cursor = 0
@@ -87,7 +91,7 @@ export class PhraseSegmenter {
       cursor += take
     }
     this.reset()
-    this.onPhrase(joined)
+    this.onPhrase(joined, { speechEndAtMs, captureDurationMs: joined.length / this.sampleRate * 1000 })
   }
 }
 
@@ -100,7 +104,7 @@ export interface MeetingCapture {
 }
 
 export async function startMeetingCapture(
-  onChunk: (wav: ArrayBuffer) => void,
+  onChunk: (wav: ArrayBuffer, timing: CaptureTiming) => void,
   onEnded: () => void,
   onDrop: () => void,
   muteOriginal: boolean,
@@ -143,9 +147,9 @@ export async function startMeetingCapture(
     if (displaySurface && displaySurface !== 'browser') throw new Error('Select the meeting browser tab, not a screen or window.')
     context = new AudioContext()
     if (!context.audioWorklet) throw new Error('This browser does not support AudioWorklet capture.')
-    const segmenter = new PhraseSegmenter(context.sampleRate, (samples) => {
+    const segmenter = new PhraseSegmenter(context.sampleRate, (samples, timing) => {
       const wav = encodePcmWav(samples, context!.sampleRate, OUTPUT_RATE)
-      if (wav.byteLength <= MAX_WAV_BYTES) onChunk(wav)
+      if (wav.byteLength <= MAX_WAV_BYTES) onChunk(wav, timing)
       else onDrop()
     }, onDrop)
     moduleUrl = URL.createObjectURL(new Blob([captureWorkletCode], { type: 'text/javascript' }))

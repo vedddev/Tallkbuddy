@@ -92,8 +92,9 @@ describe('meeting tab capture', () => {
     vi.stubGlobal('AudioWorkletNode', FakeNode)
     vi.stubGlobal('URL', { createObjectURL: vi.fn(() => 'blob:meeting'), revokeObjectURL: vi.fn() })
     const chunks: ArrayBuffer[] = []
+    const phraseTimings: { captureDurationMs: number; speechEndAtMs: number }[] = []
     const onActivity = vi.fn()
-    const capture = await startMeetingCapture((wav) => chunks.push(wav), vi.fn(), vi.fn(), false, onActivity)
+    const capture = await startMeetingCapture((wav, timing) => { chunks.push(wav); phraseTimings.push(timing) }, vi.fn(), vi.fn(), false, onActivity)
     expect(getDisplayMedia).toHaveBeenCalledWith(expect.objectContaining({ video: expect.any(Object), audio: expect.any(Object) }))
     const push = (value: number, count: number) => {
       for (let index = 0; index < count; index++) FakeNode.latest.port.onmessage?.({ data: new Float32Array(100).fill(value) } as MessageEvent<Float32Array>)
@@ -105,6 +106,8 @@ describe('meeting tab capture', () => {
     expect(onActivity.mock.calls.some(([level]) => level > 0)).toBe(true)
     expect(chunks).toHaveLength(1)
     expect(new DataView(chunks[0]).getUint32(24, true)).toBe(16_000)
+    expect(phraseTimings[0].captureDurationMs).toBeGreaterThan(0)
+    expect(Number.isFinite(phraseTimings[0].speechEndAtMs)).toBe(true)
     capture.pause()
     expect(onActivity).toHaveBeenLastCalledWith(0)
     push(0.2, 9)

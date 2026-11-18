@@ -1,4 +1,5 @@
 import { apiBase } from './api'
+import type { CaptureTiming, SocketRoundTripTiming } from './latency'
 import type { Language, SocketMessage, SourceLanguage } from './types'
 
 export interface SocketConfig {
@@ -9,7 +10,7 @@ export interface SocketConfig {
 }
 
 interface Callbacks {
-  onMessage: (message: SocketMessage) => void
+  onMessage: (message: SocketMessage, timing?: SocketRoundTripTiming) => void
   onClose: (reason: string) => void
   onDrop: () => void
 }
@@ -23,7 +24,8 @@ export function socketUrl(base = apiBase): string {
 export class TranslationSocket {
   private socket: WebSocket | null = null
   private inflight = false
-  private queued: ArrayBuffer[] = []
+  private queued: { wav: ArrayBuffer; capture?: CaptureTiming }[] = []
+  private inFlightTiming: { submittedAtMs: number; capture?: CaptureTiming } | null = null
   private config: SocketConfig | null = null
   private drainWaiters: (() => void)[] = []
   private intentionalClose = false
@@ -56,23 +58,31 @@ export class TranslationSocket {
         }))
       }
       socket.onmessage = (event) => {
+        const receivedAtMs = performance.now()
         let message: SocketMessage
         try { message = JSON.parse(event.data) as SocketMessage }
         catch { fail('The server sent an invalid message.'); socket.close(); return }
         if (message.type === 'ready') {
           if (!settled) { settled = true; window.clearTimeout(timeout); resolve() }
-        } else if (message.type === 'result' || message.type === 'error') {
+        }
+        let timing: SocketRoundTripTiming | undefined
+        if (message.type === 'result' && this.inFlightTiming) {
+          timing = { ...this.inFlightTiming, receivedAtMs }
+        }
+        if (message.type === 'result' || message.type === 'error') {
           if (message.type === 'error' && !settled) { fail(message.message); socket.close() }
           this.inflight = false
+          this.inFlightTiming = null
           this.flush()
         }
-        this.callbacks.onMessage(message)
+        this.callbacks.onMessage(message, timing)
         if (message.type === 'error' && !message.recoverable) socket.close()
       }
       socket.onerror = () => fail('Unable to connect to translation. Check that the backend is running.')
       socket.onclose = (event) => {
         fail(event.code === 1008 ? 'Your session expired or is no longer authorized. Sign in again.' : 'Translation connection closed before it was ready.')
         this.inflight = false
+        this.inFlightTiming = null
         this.queued = []
         this.resolveDrain()
         const isCurrent = this.socket === socket
@@ -82,15 +92,16 @@ export class TranslationSocket {
     })
   }
 
-  sendAudio(wav: ArrayBuffer): boolean {
+  sendAudio(wav: ArrayBuffer, capture?: CaptureTiming): boolean {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN || !this.config) return false
     if (this.inflight) {
       if (this.queued.length >= 3) { this.callbacks.onDrop(); return false }
-      this.queued.push(wav)
+      this.queued.push({ wav, capture })
       return true
     }
     this.inflight = true
     if (this.config.save_history) this.socket.send(JSON.stringify({ type: 'chunk', request_id: crypto.randomUUID() }))
+    this.inFlightTiming = { submittedAtMs: performance.now(), capture }
     this.socket.send(wav)
     return true
   }
@@ -98,7 +109,7 @@ export class TranslationSocket {
   private flush(): void {
     if (this.queued.length) {
       const next = this.queued.shift()!
-      this.sendAudio(next)
+      this.sendAudio(next.wav, next.capture)
     } else this.resolveDrain()
   }
 
@@ -128,6 +139,7 @@ export class TranslationSocket {
     this.socket = null
     this.queued = []
     this.inflight = false
+    this.inFlightTiming = null
     this.resolveDrain()
   }
 }

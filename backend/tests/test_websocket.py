@@ -17,6 +17,8 @@ from app.ai.languages import LANGUAGE_NAMES
 from app.ai.schemas import TranscriptionResponse, TranslationResponse
 from app.ai.service import AINoSpeechError, AIProviderFailure, AIProviderTimeout
 from app.db.models import UserSession
+from app.ws.protocol import ResultMessage
+from app.ws.translate import _send
 from tests.test_auth import AuthHarness, auth_harness  # noqa: F401 - isolated DB fixture
 
 
@@ -32,6 +34,29 @@ def wav_chunk() -> bytes:
         file.setframerate(16000)
         file.writeframes(b"\x01\x00" * 1600)
     return buffer.getvalue()
+
+
+def test_optional_timing_metadata_is_numeric_and_contains_no_diagnostics_secrets() -> None:
+    websocket = SimpleNamespace(send_json=AsyncMock())
+    message = ResultMessage(
+        chunk_id=1, original="Hello", translated="Bonjour", detected_language="en",
+        target_language="fr", processing_time_ms=820, transcription_time_ms=500,
+        translation_time_ms=270,
+    )
+    assert asyncio.run(_send(websocket, message)) is True
+    payload = websocket.send_json.await_args.args[0]
+    assert payload["transcription_time_ms"] == 500
+    assert payload["translation_time_ms"] == 270
+    assert set(payload) == {
+        "type", "chunk_id", "original", "translated", "detected_language",
+        "target_language", "processing_time_ms", "transcription_time_ms", "translation_time_ms",
+    }
+    websocket.send_json.reset_mock()
+    retry = message.model_copy(update={"transcription_time_ms": None, "translation_time_ms": None})
+    assert asyncio.run(_send(websocket, retry)) is True
+    retry_payload = websocket.send_json.await_args.args[0]
+    assert "transcription_time_ms" not in retry_payload
+    assert "translation_time_ms" not in retry_payload
 
 
 @pytest.fixture

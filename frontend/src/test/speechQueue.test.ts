@@ -13,6 +13,7 @@ class FakeUtterance {
   lang = ''
   voice: SpeechSynthesisVoice | null = null
   rate = 1
+  onstart: (() => void) | null = null
   onend: (() => void) | null = null
   onerror: (() => void) | null = null
   constructor(public text: string) {}
@@ -74,4 +75,32 @@ it('skips speech when the requested language voice is missing', () => {
   const queue = new SpeechQueue(synth)
   expect(queue.enqueue(1, 'こんにちは', 'ja', 1)).toBe('voice_unavailable')
   expect(synth.speak).not.toHaveBeenCalled()
+})
+
+it('measures browser preparation, queue wait, and actual speech start separately', () => {
+  const spoken: SpeechSynthesisUtterance[] = []
+  const synth = {
+    getVoices: () => [voice('hi-IN')],
+    speak: (utterance: SpeechSynthesisUtterance) => spoken.push(utterance),
+    pause: vi.fn(), resume: vi.fn(), cancel: vi.fn(),
+  } as unknown as SpeechSynthesis
+  vi.stubGlobal('SpeechSynthesisUtterance', FakeUtterance)
+  const clock = vi.spyOn(performance, 'now')
+  const events = vi.fn()
+  const queue = new SpeechQueue(synth, vi.fn(), vi.fn(), events)
+  clock.mockReturnValue(100)
+  queue.enqueue(1, 'First', 'hi', 1)
+  clock.mockReturnValue(120)
+  queue.enqueue(2, 'Second', 'hi', 1)
+  clock.mockReturnValue(160)
+  spoken[0].onstart?.(new Event('start') as SpeechSynthesisEvent)
+  expect(events).toHaveBeenCalledWith({ type: 'started', chunkId: 1, queueWaitMs: 0, playbackStartDelayMs: 60, startedAtMs: 160 })
+  clock.mockReturnValue(200)
+  spoken[0].onend?.(new Event('end') as SpeechSynthesisEvent)
+  clock.mockReturnValue(250)
+  spoken[1].onstart?.(new Event('start') as SpeechSynthesisEvent)
+  expect(events).toHaveBeenCalledWith({ type: 'started', chunkId: 2, queueWaitMs: 80, playbackStartDelayMs: 50, startedAtMs: 250 })
+  expect(events.mock.calls.filter(([event]) => event.type === 'prepared')).toHaveLength(2)
+  queue.stop()
+  clock.mockRestore()
 })

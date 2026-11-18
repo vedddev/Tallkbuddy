@@ -69,6 +69,8 @@ For each valid binary chunk, the server sends `processing`, followed by `result`
 
 New results include `transcription_time_ms` and `translation_time_ms`, measured around the corresponding provider service calls. `processing_time_ms` includes those calls, database checks, and optional history saving. These are server-side measurements; clients should measure from sending a binary chunk to receiving its result for their own total response latency. Retried results served from history omit the provider timings. The configured provider semaphore limits concurrent Groq calls across REST and WebSocket requests in one process.
 
+These stage timings use the backend's monotonic clock and include any wait for its provider concurrency slot and the provider request. They are optional, numeric durations only. No wall-clock timestamp, audio, credential, or user identifier is added for diagnostics. The browser uses its own monotonic clock for capture, WebSocket round trip, and playback. Never subtract a backend clock value from a browser clock value.
+
 When saving is enabled, `result` also includes `"saved":true` and `"message_id":"MESSAGE_UUID"`. Only completed translations are stored; audio is discarded. A failed or silent chunk has no history record. Saved messages can be read at `GET /api/history/{session_id}` and removed with `DELETE /api/history/{session_id}` or `DELETE /api/history` using the REST CSRF header.
 
 Errors have a stable shape:

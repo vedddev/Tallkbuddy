@@ -4,6 +4,9 @@ import { voiceForLanguage } from './voices'
 
 export type EnqueueStatus = 'queued' | 'duplicate' | 'queue_full' | 'voice_unavailable' | 'empty'
 export type PlaybackStatus = 'idle' | 'playing' | 'paused'
+export type PlaybackTimingEvent =
+  | { type: 'prepared'; chunkId: number; preparationMs: number }
+  | { type: 'started'; chunkId: number; queueWaitMs: number; playbackStartDelayMs: number; startedAtMs: number }
 
 /** Plays completed translations in arrival order without overlapping speech. */
 export class SpeechQueue {
@@ -11,15 +14,18 @@ export class SpeechQueue {
   private active: SpeechSynthesisUtterance | null = null
   private seen = new Set<number>()
   private utteranceLanguages = new WeakMap<SpeechSynthesisUtterance, Language>()
+  private utteranceTiming = new WeakMap<SpeechSynthesisUtterance, { chunkId: number; queuedAtMs: number; speakCalledAtMs: number | null }>()
   private paused = false
 
   constructor(
     private synth: SpeechSynthesis = window.speechSynthesis,
     private onPlaybackError: (language: Language) => void = () => undefined,
     private onStatusChange: (status: PlaybackStatus, queued: number) => void = () => undefined,
+    private onTiming: (event: PlaybackTimingEvent) => void = () => undefined,
   ) {}
 
   enqueue(chunkId: number, text: string, language: Language, rate: number): EnqueueStatus {
+    const preparationStartedAtMs = performance.now()
     if (!text.trim()) return 'empty'
     if (this.seen.has(chunkId)) return 'duplicate'
     if (this.pending.length >= 8) return 'queue_full'
@@ -32,9 +38,24 @@ export class SpeechQueue {
     utterance.voice = voice
     utterance.rate = rate
     this.utteranceLanguages.set(utterance, language)
+    utterance.onstart = () => {
+      const timing = this.utteranceTiming.get(utterance)
+      if (!timing || this.active !== utterance || timing.speakCalledAtMs === null) return
+      utterance.onstart = null
+      const startedAtMs = performance.now()
+      this.onTiming({
+        type: 'started', chunkId: timing.chunkId,
+        queueWaitMs: Math.max(0, timing.speakCalledAtMs - timing.queuedAtMs),
+        playbackStartDelayMs: Math.max(0, startedAtMs - timing.speakCalledAtMs),
+        startedAtMs,
+      })
+    }
     utterance.onend = () => this.complete(utterance)
     utterance.onerror = () => { this.onPlaybackError(language); this.complete(utterance) }
+    const queuedAtMs = performance.now()
+    this.utteranceTiming.set(utterance, { chunkId, queuedAtMs, speakCalledAtMs: null })
     this.pending.push(utterance)
+    this.onTiming({ type: 'prepared', chunkId, preparationMs: Math.max(0, queuedAtMs - preparationStartedAtMs) })
     this.playNext()
     this.reportStatus()
     return 'queued'
@@ -48,7 +69,7 @@ export class SpeechQueue {
     this.paused = true
     this.pending = []
     this.seen.clear()
-    if (this.active) { this.active.onend = null; this.active.onerror = null }
+    if (this.active) { this.active.onstart = null; this.active.onend = null; this.active.onerror = null }
     this.active = null
     this.synth.cancel()
     this.reportStatus()
@@ -69,6 +90,8 @@ export class SpeechQueue {
     if (this.paused || this.active || !this.pending.length) return
     const next = this.pending.shift()!
     this.active = next
+    const timing = this.utteranceTiming.get(next)
+    if (timing) timing.speakCalledAtMs = performance.now()
     try { this.synth.speak(next); this.reportStatus() }
     catch {
       this.active = null

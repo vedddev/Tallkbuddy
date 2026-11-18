@@ -2,9 +2,11 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { AudioLines, Captions, Headphones, Pause, Play, Radio, Square, Volume2, VolumeX } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { LanguageSelect } from './LanguageSelect'
+import { LatencyDiagnostics } from './LatencyDiagnostics'
 import { Button, Card, ErrorMessage, StatusIndicator } from './ui/Primitives'
 import { api } from '../lib/api'
 import { languageByCode } from '../lib/languageRegistry'
+import { appendTiming, durationMs, timingRecord, type PhraseTimingRecord } from '../lib/latency'
 import { startMeetingCapture, type MeetingCapture } from '../lib/meetingAudio'
 import { SpeechQueue, type PlaybackStatus } from '../lib/speechQueue'
 import { TranslationSocket } from '../lib/socket'
@@ -81,6 +83,7 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [results, setResults] = useState<TimedResult[]>([])
+  const [timings, setTimings] = useState<PhraseTimingRecord[]>([])
   const captureRef = useRef<MeetingCapture | null>(null)
   const socketRef = useRef<TranslationSocket | null>(null)
   const speechRef = useRef<SpeechQueue | null>(null)
@@ -154,7 +157,7 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
 
   const connect = async (generation: number) => {
     const socket = new TranslationSocket({
-      onMessage: (message) => {
+      onMessage: (message, timing) => {
         if (generation !== generationRef.current || !mountedRef.current || !startedRef.current) return
         if (message.type === 'processing') setProcessing(true)
         if (message.type === 'result') {
@@ -163,8 +166,9 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
           seenResultsRef.current.add(message.chunk_id)
           setResults((items) => [...items, { ...message, receivedAt: Date.now(), displayId: ++displaySequenceRef.current }].slice(-30))
           setError('')
-          playbackSequenceRef.current += 1
-          const playbackResult = speechRef.current?.enqueue(playbackSequenceRef.current, message.translated, message.target_language, preferences?.speech_rate || 1)
+          const playbackSequence = ++playbackSequenceRef.current
+          setTimings((items) => appendTiming(items, timingRecord(playbackSequence, message, timing)))
+          const playbackResult = speechRef.current?.enqueue(playbackSequence, message.translated, message.target_language, preferences?.speech_rate || 1)
           if (playbackResult === 'voice_unavailable' || !speechRef.current) setNotice(`No ${languageByCode(message.target_language).name} voice is available in this browser. Captions will continue without speech.`)
           else if (playbackResult === 'queue_full') setNotice('Speech playback is behind; some translated audio was skipped.')
           else if (playbackResult === 'empty') setNotice('The translation was empty, so there is no speech to play.')
@@ -217,10 +221,10 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
   const prepareCapture = async (generation: number): Promise<MeetingCapture | null> => {
     setStatus('permission'); setError(''); setNotice('')
     const capture = await startMeetingCapture(
-      (wav) => {
+      (wav, captureTiming) => {
         const socket = socketRef.current
         if (!socket?.isOpen()) setNotice('A phrase was skipped while reconnecting.')
-        else socket.sendAudio(wav)
+        else socket.sendAudio(wav, captureTiming)
       },
       () => { if (generation === generationRef.current) { setNotice('Tab sharing ended.'); void stop(false) } },
       () => setNotice('A long uninterrupted phrase had no safe boundary and was skipped.'),
@@ -256,7 +260,7 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
     const generation = status === 'shared' ? generationRef.current : ++generationRef.current
     pausedRef.current = false
     terminalErrorRef.current = false
-    setError(''); setNotice(''); setResults([]); setProcessing(false); setPlayback('idle')
+    setError(''); setNotice(''); setResults([]); setTimings([]); setProcessing(false); setPlayback('idle')
     seenResultsRef.current.clear()
     playbackSequenceRef.current = 0
     displaySequenceRef.current = 0
@@ -274,6 +278,18 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
         speechRef.current = new SpeechQueue(window.speechSynthesis,
           (language) => setNotice(`The ${languageByCode(language).name} voice could not play. Captions will continue.`),
           (state, queued) => { if (mountedRef.current) { setPlayback(state); setQueuedSpeech(queued) } },
+          (event) => {
+            if (!mountedRef.current) return
+            setTimings((items) => items.map((item) => item.id !== event.chunkId ? item :
+              event.type === 'prepared'
+                ? { ...item, browserPreparationMs: event.preparationMs }
+                : {
+                  ...item,
+                  queueWaitMs: event.queueWaitMs,
+                  playbackStartDelayMs: event.playbackStartDelayMs,
+                  totalMs: durationMs(item.speechEndAtMs, event.startedAtMs),
+                }))
+          },
         )
       }
       await connect(generation)
@@ -318,6 +334,11 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
   const sourceName = source === 'auto' ? 'Auto detect' : languageByCode(source).name
   const targetName = languageByCode(target).name
   const statusLabel = processing && status === 'listening' ? 'Processing' : statusLabels[status]
+  const websocketStatus = status === 'connecting' || status === 'reconnecting'
+    ? 'Connecting'
+    : (status === 'listening' || status === 'paused') && socketRef.current?.isOpen()
+      ? 'Connected'
+      : 'Disconnected'
 
   return <section id="meeting" className="min-w-0 space-y-5" aria-label="Meeting interpreter">
     <div className="flex flex-wrap items-start justify-between gap-4"><div><p className="eyebrow">LOCAL MEETING LISTENER</p><h1 className="mt-1 text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">Meeting Interpreter</h1><p className="mt-2 max-w-2xl text-sm leading-6 text-muted">Share the meeting browser tab with audio. Complete phrases appear as captions and translated speech plays on this device only.</p></div><div className="flex flex-wrap items-center gap-3 rounded-lg border border-line bg-surface px-3 py-2"><StatusIndicator label={statusLabel} tone={status === 'error' || status === 'disconnected' ? 'danger' : status === 'listening' ? 'success' : 'neutral'} /><span className="h-4 w-px bg-line" aria-hidden="true" /><StatusIndicator label={['listening', 'paused'].includes(status) ? 'Connected' : status === 'connecting' || status === 'reconnecting' ? 'Connecting' : 'Offline'} tone={['listening', 'paused'].includes(status) ? 'success' : 'neutral'} /></div></div>
@@ -332,6 +353,7 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
       <div className="mt-4 flex flex-wrap items-center gap-4 border-t border-line pt-4 text-xs text-muted"><span className="flex items-center gap-2"><AudioLines size={15} />Audio activity</span><div role="meter" aria-label="Captured audio activity" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(activity * 100)} className="h-1.5 w-32 overflow-hidden rounded-full bg-raised"><div className="h-full rounded-full bg-accent transition-[width] duration-150" style={{ width: `${Math.round(activity * 100)}%` }} /></div><span>{activity > 0 && status === 'listening' ? 'Audio detected' : status === 'paused' ? 'Paused' : 'Waiting for audio'}</span><span className="flex items-center gap-1.5 sm:ml-auto">{playback === 'playing' ? <Volume2 size={15} /> : <VolumeX size={15} />}{playback === 'playing' ? `Playing translated speech${queuedSpeech ? ` · ${queuedSpeech} queued` : ''}` : playback === 'paused' ? 'Playback paused' : voiceAvailable ? 'Playback idle' : 'Voice unavailable'}</span></div>
     </Card>
 
+    <LatencyDiagnostics records={timings} connection={websocketStatus} onReset={() => setTimings([])} />
     {notice && <p role="status" className="rounded-lg border border-[var(--color-warning)] bg-[var(--color-warning-surface)] px-4 py-3 text-sm text-[var(--color-warning)]">{notice}</p>}
     {error && <ErrorMessage message={error} />}
     <div className="grid min-w-0 gap-4 md:grid-cols-2"><PhrasePanel title="Original speech" icon={<Captions size={17} className="text-muted" />} results={results} field="original" empty="Completed spoken phrases will appear here after transcription." pending={processing} /><PhrasePanel title="Translated speech" icon={<Volume2 size={17} className="text-accent" />} results={results} field="translated" empty="Translated captions will appear here. Playback requires a compatible browser voice." pending={processing} language={targetName} /></div>
