@@ -6,20 +6,32 @@ function displayMs(value: number | null): string {
   return value >= 1000 ? `${(value / 1000).toFixed(2)} s` : `${Math.round(value)} ms`
 }
 
-export function LatencyDiagnostics({ records, connection, onReset }: {
+export function LatencyDiagnostics({ records, connection, onReset, capture = 'Idle', inputLevel = 0, phraseCount = 0, processing = false, processingErrors = 0, droppedPhrases = 0, droppedSamples = 0, queueDepth = 0, playbackQueueDepth = 0 }: {
   records: PhraseTimingRecord[]
   connection: string
   onReset: () => void
+  capture?: string
+  inputLevel?: number
+  phraseCount?: number
+  processing?: boolean
+  processingErrors?: number
+  droppedPhrases?: number
+  droppedSamples?: number
+  queueDepth?: number
+  playbackQueueDepth?: number
 }) {
   const summary = latencySummary(records)
   const latest = records.at(-1)
   const metrics = [
     ['Captured phrase duration', latest?.captureDurationMs ?? null, 'Browser'],
+    ['Phrase encoding', latest?.encodingMs ?? null, 'Browser'],
     ['Speech end to submission', latest?.speechEndToSubmitMs ?? null, 'Browser estimate'],
+    ['Speech end to caption', latest?.captionMs ?? null, 'Browser estimate'],
     ['WebSocket round trip', latest?.roundTripMs ?? null, 'Browser'],
     ['STT call duration', latest?.sttMs ?? null, 'Server'],
     ['Translation call duration', latest?.translationMs ?? null, 'Server'],
     ['Total server processing', latest?.serverProcessingMs ?? null, 'Server'],
+    ['Azure speech preparation', latest?.ttsMs ?? null, 'Server'],
     ['Browser speech preparation', latest?.browserPreparationMs ?? null, 'Browser'],
     ['Playback queue wait', latest?.queueWaitMs ?? null, 'Browser'],
     ['Playback start delay', latest?.playbackStartDelayMs ?? null, 'Browser'],
@@ -33,19 +45,31 @@ export function LatencyDiagnostics({ records, connection, onReset }: {
         <span>Connection: {connection} · {records.length} recent phrase{records.length === 1 ? '' : 's'} · {summary.completeCount} with playback timing</span>
         <button type="button" className="btn-secondary" onClick={onReset} disabled={!records.length}><RotateCcw size={14} aria-hidden="true" />Reset</button>
       </div>
+      <dl className="mt-3 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
+        {[
+          ['Capture', capture], ['Processing', processing ? 'Yes' : 'No'],
+          ['Relative input activity', `${Math.round(inputLevel * 100)}%`], ['Phrases accepted', phraseCount],
+          ['WebSocket queue', `${queueDepth}/4`], ['Playback queue', `${playbackQueueDepth}/8`],
+          ['Processing errors', processingErrors], ['Dropped phrases', droppedPhrases],
+          ['Dropped audio samples', droppedSamples],
+        ].map(([label, value]) => <div key={label} className="rounded-lg bg-raised p-2"><dt className="text-muted">{label}</dt><dd className="mt-0.5 font-medium text-foreground">{value}</dd></div>)}
+      </dl>
       {!latest ? <p className="mt-3 text-sm text-muted">No phrase timings yet. Start interpreting to collect measurements in memory.</p> : <>
+        <p className="mt-3 break-all text-xs text-muted">Last phrase: {latest.phraseId ?? 'Unavailable'} · Socket chunk: {latest.serverChunkId} · Capture started: {latest.captureStartedAtMs === null ? 'Unavailable' : 'Measured locally'} · Speech onset: {latest.speechStartAtMs === null ? 'Unavailable' : 'Estimated locally'}</p>
         <dl className="mt-4 grid gap-3 text-xs sm:grid-cols-2 lg:grid-cols-4">
           {[
-            ['Last phrase', summary.lastMs],
-            ['Average', summary.averageMs],
-            ['p50', summary.p50Ms],
-            ['p95', summary.p95Ms],
+            ['Caption average', summary.captionAverageMs],
+            ['Caption p50', summary.captionP50Ms],
+            ['Caption p95', summary.captionP95Ms],
+            ['Playback average', summary.averageMs],
+            ['Playback p50', summary.p50Ms],
+            ['Playback p95', summary.p95Ms],
           ].map(([label, value]) => <div key={label} className="rounded-lg bg-raised p-3"><dt className="text-muted">{label}</dt><dd className="mt-1 text-sm font-semibold text-foreground">{displayMs(value as number | null)}</dd></div>)}
         </dl>
         <dl className="mt-4 grid gap-x-6 gap-y-2 text-xs sm:grid-cols-2">
           {metrics.map(([label, value, origin]) => <div key={label} className="flex min-w-0 justify-between gap-3 border-b border-line py-1.5"><dt className="min-w-0 text-muted">{label} <span className="sr-only">({origin})</span></dt><dd className="shrink-0 font-medium text-foreground">{displayMs(value)}</dd></div>)}
         </dl>
-        <p className="mt-3 text-xs leading-5 text-muted">Browser and server durations use separate monotonic clocks. Speech end is estimated from the detected pause. Playback start requires a browser speech start event; missing voice or events leave it unavailable. Statistics include only phrases with playback timing.</p>
+        <p className="mt-3 text-xs leading-5 text-muted">Browser and server durations use separate monotonic clocks. Speech onset/end are estimated from the detected pause. Playback start requires a browser speech start event; missing voice or events leave it unavailable. Statistics include only measured phrases. Dropped audio samples indicate main-thread overload; an affected phrase is discarded.</p>
       </>}
     </div>
   </details>

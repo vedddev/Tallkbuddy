@@ -17,10 +17,13 @@ it('keeps browser durations separate from server-provided stages', () => {
   })
   expect(record).toMatchObject({
     captureDurationMs: 1200, speechEndToSubmitMs: 720, roundTripMs: 880,
+    captionMs: 1600, serverChunkId: 1,
     serverProcessingMs: 800, sttMs: 500, translationMs: 250, totalMs: null,
   })
   expect(durationMs(record.speechEndAtMs, 1900)).toBe(1800)
   expect(durationMs(300, 100)).toBeNull()
+  expect(JSON.stringify(record)).not.toContain('Hello')
+  expect(JSON.stringify(record)).not.toContain('Bonjour')
 })
 
 it('treats missing or invalid optional timing as unavailable, never zero', () => {
@@ -39,9 +42,10 @@ it('calculates interpolated p50 and p95 only from completed playback records', (
   expect(summary.averageMs).toBe(250)
   expect(summary.p50Ms).toBe(250)
   expect(summary.p95Ms).toBeCloseTo(385)
+  expect(summary.captionP95Ms).toBeNull()
   expect(summary.lastMs).toBeNull()
   expect(percentile([], 0.95)).toBeNull()
-  expect(latencySummary([])).toEqual({ lastMs: null, completeCount: 0, averageMs: null, p50Ms: null, p95Ms: null })
+  expect(latencySummary([])).toEqual({ lastMs: null, completeCount: 0, averageMs: null, p50Ms: null, p95Ms: null, captionAverageMs: null, captionP50Ms: null, captionP95Ms: null })
 })
 
 it('bounds in-memory records and renders an honest empty/reset state', () => {

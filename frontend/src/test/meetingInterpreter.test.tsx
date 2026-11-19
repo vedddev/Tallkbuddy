@@ -5,8 +5,81 @@ import { MeetingInterpreter } from '../components/MeetingInterpreter'
 import * as meetingAudio from '../lib/meetingAudio'
 import { TranslationSocket } from '../lib/socket'
 import { languageRegistry } from '../lib/languageRegistry'
+import { reconnectDelayMs } from '../components/MeetingInterpreter'
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
+
+it('bounds exponential reconnect delay with jitter', () => {
+  expect(reconnectDelayMs(0, 0)).toBe(800)
+  expect(reconnectDelayMs(1, 0.5)).toBe(2000)
+  expect(reconnectDelayMs(2, 1)).toBe(4000)
+  expect(reconnectDelayMs(50, 1)).toBe(4000)
+})
+
+it('pauses on a dropped connection, reconnects once, and never replays the old phrase', async () => {
+  vi.spyOn(Math, 'random').mockReturnValue(0)
+  const capture = { pause: vi.fn(), resume: vi.fn(), stop: vi.fn().mockResolvedValue(undefined), setOriginalMuted: vi.fn().mockResolvedValue(false), originalMuteSupported: false }
+  vi.spyOn(meetingAudio, 'startMeetingCapture').mockResolvedValue(capture)
+  class FakeWebSocket {
+    static OPEN = 1
+    static instances: FakeWebSocket[] = []
+    readyState = 0
+    sent: (string | ArrayBuffer)[] = []
+    onopen: (() => void) | null = null
+    onmessage: ((event: { data: string }) => void) | null = null
+    onclose: ((event: { code: number }) => void) | null = null
+    onerror: (() => void) | null = null
+    constructor(_url: string) { FakeWebSocket.instances.push(this) }
+    send(value: string | ArrayBuffer) { this.sent.push(value) }
+    close() { this.readyState = 3; this.onclose?.({ code: 1000 }) }
+    open() { this.readyState = 1; this.onopen?.() }
+    receive(value: object) { this.onmessage?.({ data: JSON.stringify(value) }) }
+  }
+  vi.stubGlobal('WebSocket', FakeWebSocket)
+  render(<MemoryRouter><MeetingInterpreter preferences={null} microphoneActive={false} onActiveChange={vi.fn()} /></MemoryRouter>)
+  fireEvent.click(screen.getByRole('button', { name: 'Start interpretation' }))
+  await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+  await act(async () => { FakeWebSocket.instances[0].open(); FakeWebSocket.instances[0].receive({ type: 'ready', target_language: 'hi', source_language: null, audio_format: 'wav' }) })
+  await waitFor(() => expect(screen.getByRole('status', { name: 'Listening' })).toBeInTheDocument())
+  act(() => FakeWebSocket.instances[0].close())
+  expect(screen.getByRole('status', { name: 'Reconnecting' })).toBeInTheDocument()
+  await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2), { timeout: 2500 })
+  await act(async () => { FakeWebSocket.instances[1].open(); FakeWebSocket.instances[1].receive({ type: 'ready', target_language: 'hi', source_language: null, audio_format: 'wav' }) })
+  await waitFor(() => expect(screen.getByRole('status', { name: 'Listening' })).toBeInTheDocument())
+  expect(capture.pause).toHaveBeenCalled()
+  expect(capture.resume).toHaveBeenCalledTimes(2)
+  expect(FakeWebSocket.instances[1].sent).toHaveLength(1)
+})
+
+it('starts microphone mode only after a click, uses the selected device, and stops capture', async () => {
+  const capture = { pause: vi.fn(), resume: vi.fn(), stop: vi.fn().mockResolvedValue(undefined), setOriginalMuted: vi.fn().mockResolvedValue(false), originalMuteSupported: false }
+  const startCapture = vi.spyOn(meetingAudio, 'startMicrophoneCapture').mockResolvedValue(capture)
+  vi.spyOn(TranslationSocket.prototype, 'connect').mockResolvedValue(undefined)
+  vi.spyOn(TranslationSocket.prototype, 'stop').mockResolvedValue(undefined)
+  Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { enumerateDevices: vi.fn().mockResolvedValue([{ kind: 'audioinput', deviceId: 'mic-1', label: 'USB microphone' }]) } })
+  render(<MemoryRouter><MeetingInterpreter mode="microphone" preferences={null} microphoneActive={false} onActiveChange={vi.fn()} /></MemoryRouter>)
+  expect(startCapture).not.toHaveBeenCalled()
+  await waitFor(() => expect(screen.getByRole('option', { name: 'USB microphone' })).toBeInTheDocument())
+  fireEvent.change(screen.getByLabelText('Microphone'), { target: { value: 'mic-1' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Start interpretation' }))
+  await waitFor(() => expect(startCapture).toHaveBeenCalledWith(expect.any(Function), expect.any(Function), expect.any(Function), 'mic-1', expect.any(Function), expect.any(Function)))
+  await waitFor(() => expect(screen.getByRole('status', { name: 'Listening' })).toBeInTheDocument())
+  fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
+  expect(capture.pause).toHaveBeenCalledOnce()
+  fireEvent.click(screen.getByRole('button', { name: 'Resume' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Stop session' }))
+  await waitFor(() => expect(capture.stop).toHaveBeenCalledOnce())
+})
+
+it('shows microphone permission denial and does not connect', async () => {
+  vi.spyOn(meetingAudio, 'startMicrophoneCapture').mockRejectedValue(new Error('Microphone access was denied. Allow microphone access in browser site settings and try again.'))
+  const connect = vi.spyOn(TranslationSocket.prototype, 'connect')
+  Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { enumerateDevices: vi.fn().mockResolvedValue([]) } })
+  render(<MemoryRouter><MeetingInterpreter mode="microphone" preferences={null} microphoneActive={false} onActiveChange={vi.fn()} /></MemoryRouter>)
+  fireEvent.click(screen.getByRole('button', { name: 'Start interpretation' }))
+  await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Microphone access was denied'))
+  expect(connect).not.toHaveBeenCalled()
+})
 
 it('asks for tab capture from Start and shows a useful permission error', async () => {
   const getDisplayMedia = vi.fn().mockRejectedValue(new DOMException('denied', 'NotAllowedError'))
@@ -66,7 +139,7 @@ it('keeps translated captions visible when the selected browser voice is missing
     FakeWebSocket.latest.open()
     FakeWebSocket.latest.receive({ type: 'ready', target_language: 'ja', source_language: 'en', audio_format: 'wav' })
   })
-  await waitFor(() => expect(screen.getByText('Listening')).toBeInTheDocument())
+  await waitFor(() => expect(screen.getByRole('status', { name: 'Listening' })).toBeInTheDocument())
   act(() => FakeWebSocket.latest.receive({ type: 'processing', chunk_id: 1 }))
   expect(screen.getByRole('status', { name: 'Processing' })).toBeInTheDocument()
   const longTranslation = 'おはようございます。'.repeat(50)

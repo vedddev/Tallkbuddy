@@ -61,3 +61,5 @@ export type SocketMessage =
       saved?: boolean; message_id?: string
     }
   | { type: 'error'; code: string; message: string; recoverable: boolean }
+  | { type: 'speech_audio'; chunk_id: number; audio_format: 'wav'; audio_base64: string; preparation_time_ms?: number }
+  | { type: 'speech_error'; chunk_id: number; code: string; message: string }

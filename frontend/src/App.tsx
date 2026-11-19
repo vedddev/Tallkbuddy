@@ -35,6 +35,7 @@ export function App() {
     <Route path="/translate" element={<PrivatePage><TranslatePage /></PrivatePage>} />
     <Route path="/workspace" element={<PrivatePage><WorkspaceRoute /></PrivatePage>} />
     <Route path="/meeting" element={<PrivatePage><MeetingPage /></PrivatePage>} />
+    <Route path="/microphone" element={<PrivatePage><MeetingPage mode="microphone" /></PrivatePage>} />
     <Route path="/history" element={<PrivatePage><HistoryPage /></PrivatePage>} />
     <Route path="/history/:sessionId" element={<PrivatePage><SessionDetailPage /></PrivatePage>} />
     <Route path="/settings" element={<PrivatePage><SettingsPage /></PrivatePage>} />

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { PhraseSegmenter, startMeetingCapture } from '../lib/meetingAudio'
+import { PhraseSegmenter, startMeetingCapture, startMicrophoneCapture } from '../lib/meetingAudio'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -42,6 +42,60 @@ describe('meeting phrase segmentation', () => {
     feed(segmenter, 0.2, 122)
     expect(onPhrase).not.toHaveBeenCalled()
     expect(onDrop).toHaveBeenCalledOnce()
+  })
+})
+
+describe('browser microphone capture', () => {
+  it('does not request permission until capture starts and reports denial', async () => {
+    const getUserMedia = vi.fn().mockRejectedValue(new DOMException('denied', 'NotAllowedError'))
+    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia } })
+    expect(getUserMedia).not.toHaveBeenCalled()
+    await expect(startMicrophoneCapture(vi.fn(), vi.fn(), vi.fn(), 'selected-device')).rejects.toThrow('Microphone access was denied')
+    expect(getUserMedia).toHaveBeenCalledWith({ audio: expect.objectContaining({ deviceId: { exact: 'selected-device' } }), video: false })
+  })
+
+  it('uses the same phrase encoder, pauses cleanly, and releases a disconnected microphone', async () => {
+    const stop = vi.fn()
+    const track = { stop, onended: null as (() => void) | null, getSettings: () => ({}) }
+    const getUserMedia = vi.fn().mockResolvedValue({ getAudioTracks: () => [track], getVideoTracks: () => [], getTracks: () => [track] })
+    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia } })
+    const close = vi.fn().mockResolvedValue(undefined)
+    class FakeContext {
+      sampleRate = 1000
+      state = 'running'
+      destination = {}
+      audioWorklet = { addModule: vi.fn().mockResolvedValue(undefined) }
+      createMediaStreamSource = () => ({ connect: vi.fn(), disconnect: vi.fn() })
+      resume = vi.fn().mockResolvedValue(undefined)
+      close = close
+    }
+    class FakeNode {
+      static latest: FakeNode
+      port: { onmessage: ((event: MessageEvent<Float32Array>) => void) | null } = { onmessage: null }
+      connect = vi.fn()
+      disconnect = vi.fn()
+      constructor() { FakeNode.latest = this }
+    }
+    vi.stubGlobal('AudioContext', FakeContext)
+    vi.stubGlobal('AudioWorkletNode', FakeNode)
+    vi.stubGlobal('URL', { createObjectURL: vi.fn(() => 'blob:mic'), revokeObjectURL: vi.fn() })
+    const chunks: ArrayBuffer[] = []
+    const ended = vi.fn()
+    const capture = await startMicrophoneCapture((wav) => chunks.push(wav), ended, vi.fn(), 'selected-device')
+    const feed = (value: number, count: number) => {
+      for (let index = 0; index < count; index++) FakeNode.latest.port.onmessage?.({ data: new Float32Array(100).fill(value) } as MessageEvent<Float32Array>)
+    }
+    capture.resume()
+    feed(0.2, 9); feed(0, 7)
+    expect(chunks).toHaveLength(1)
+    expect(new DataView(chunks[0]).getUint32(24, true)).toBe(16_000)
+    capture.pause()
+    feed(0.2, 9); feed(0, 7)
+    expect(chunks).toHaveLength(1)
+    track.onended?.()
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce())
+    expect(ended).toHaveBeenCalledOnce()
+    expect(stop).toHaveBeenCalledOnce()
   })
 })
 

@@ -22,6 +22,65 @@ class FakeWebSocket {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('translation socket protocol', () => {
+  it('cancels an in-flight phrase immediately without replaying queued audio', async () => {
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const changes: number[] = []
+    const socket = new TranslationSocket({ onMessage: vi.fn(), onClose: vi.fn(), onDrop: vi.fn(), onQueueChange: (depth) => changes.push(depth) })
+    const connected = socket.connect({ source_language: 'auto', target_language: 'hi', save_history: false })
+    const transport = FakeWebSocket.instance
+    transport.open(); transport.receive({ type: 'ready', target_language: 'hi', source_language: null, audio_format: 'wav' })
+    await connected
+    socket.sendAudio(new ArrayBuffer(44)); socket.sendAudio(new ArrayBuffer(46))
+    expect(socket.queueDepth()).toBe(2)
+    await socket.stop()
+    expect(socket.queueDepth()).toBe(0)
+    expect(changes.at(-1)).toBe(0)
+    expect(transport.sent).toHaveLength(3)
+    expect(JSON.parse(transport.sent[2] as string)).toEqual({ type: 'stop' })
+  })
+
+  it('ignores stale responses from a replaced connection', async () => {
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const onMessage = vi.fn()
+    const socket = new TranslationSocket({ onMessage, onClose: vi.fn(), onDrop: vi.fn() })
+    const config = { source_language: 'auto' as const, target_language: 'hi' as const, save_history: false }
+    const firstReady = socket.connect(config)
+    const first = FakeWebSocket.instance
+    first.open(); first.receive({ type: 'ready', target_language: 'hi', source_language: null, audio_format: 'wav' }); await firstReady
+    const secondReady = socket.connect(config)
+    const second = FakeWebSocket.instance
+    second.open(); second.receive({ type: 'ready', target_language: 'hi', source_language: null, audio_format: 'wav' }); await secondReady
+    onMessage.mockClear()
+    first.receive({ type: 'result', chunk_id: 1, original: 'stale', translated: 'stale', detected_language: 'en', target_language: 'hi', processing_time_ms: 1 })
+    expect(onMessage).not.toHaveBeenCalled()
+    socket.close()
+  })
+  it('waits for optional generated speech before submitting the next phrase', async () => {
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const socket = new TranslationSocket({ onMessage: vi.fn(), onClose: vi.fn(), onDrop: vi.fn() })
+    const connected = socket.connect({ source_language: 'auto', target_language: 'hi', save_history: false, synthesize_speech: true })
+    const transport = FakeWebSocket.instance
+    transport.open()
+    expect(JSON.parse(transport.sent[0] as string).synthesize_speech).toBe(true)
+    transport.receive({ type: 'ready', target_language: 'hi', source_language: null, audio_format: 'wav' })
+    await connected
+    socket.sendAudio(new ArrayBuffer(44))
+    socket.sendAudio(new ArrayBuffer(46))
+    transport.receive({ type: 'result', chunk_id: 1, original: 'Hello', translated: 'नमस्ते', detected_language: 'en', target_language: 'hi', processing_time_ms: 10 })
+    expect(transport.sent).toHaveLength(2)
+    transport.receive({ type: 'speech_audio', chunk_id: 1, audio_format: 'wav', audio_base64: 'encoded', preparation_time_ms: 50 })
+    expect((transport.sent[2] as ArrayBuffer).byteLength).toBe(46)
+    socket.close()
+  })
+
+  it('explains missing Azure configuration without falling back silently', async () => {
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const socket = new TranslationSocket({ onMessage: vi.fn(), onClose: vi.fn(), onDrop: vi.fn() })
+    const connected = socket.connect({ source_language: 'auto', target_language: 'hi', save_history: false, synthesize_speech: true })
+    FakeWebSocket.instance.open()
+    FakeWebSocket.instance.receive({ type: 'error', code: 'speech_unavailable', message: 'Translated speech is unavailable', recoverable: true })
+    await expect(connected).rejects.toThrow('Azure speech is not configured')
+  })
   it.each(languageRegistry)('serializes $code as the selected WebSocket target', async (entry) => {
     vi.stubGlobal('WebSocket', FakeWebSocket)
     const socket = new TranslationSocket({ onMessage: vi.fn(), onClose: vi.fn(), onDrop: vi.fn() })

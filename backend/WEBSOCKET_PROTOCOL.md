@@ -47,11 +47,11 @@ To end the connection, send:
 
 The server processes messages sequentially. A `stop` already queued behind an in-flight chunk takes effect after that chunk finishes, then the server closes with code `1000`.
 
-### Optional desktop speech audio (Phase 10D)
+### Optional generated speech audio
 
-The existing browser protocol remains unchanged. A desktop client can add `"synthesize_speech":true` to `start`. This requires `AZURE_SPEECH_KEY` and `AZURE_SPEECH_REGION` on the backend; without them the server returns a recoverable `speech_unavailable` error instead of `ready`. The client must still authenticate using the session cookie and send an allowed `Origin` header. Desktop clients can obtain an in-memory session with the existing `/api/auth/login` endpoint; no token belongs in a URL. Remote desktop connections require HTTPS/WSS and trusted TLS certificates.
+The existing text-only protocol remains the default. A browser or optional desktop client can add `"synthesize_speech":true` to `start`. This requires `AZURE_SPEECH_KEY` and `AZURE_SPEECH_REGION` on the backend; without them the server returns a recoverable `speech_unavailable` error instead of `ready`. Browser WebSockets use the existing HTTP-only session cookie and allowed Origin. Desktop clients can obtain an in-memory session with the existing `/api/auth/login` endpoint; no token belongs in a URL. Remote connections require HTTPS/WSS and trusted TLS certificates.
 
-After each `result`, an opted-in client receives exactly one further JSON message with the same `chunk_id`: either `speech_audio` or `speech_error`. Wait for it before sending the next WAV phrase to preserve playback order. Speech audio is **generated translated speech**, never microphone audio:
+After each `result`, an opted-in client receives exactly one further JSON message with the same `chunk_id`: either `speech_audio` or `speech_error`. Wait for it before sending the next WAV phrase to preserve playback order. The browser client validates this WAV, queues playback locally, and does not send it into another application. Speech audio is **generated translated speech**, never microphone audio:
 
 ```json
 {"type":"speech_audio","chunk_id":1,"audio_format":"wav","audio_base64":"...","preparation_time_ms":420}
@@ -79,9 +79,13 @@ For each valid binary chunk, the server sends `processing`, followed by `result`
 
 `chunk_id` starts at 1 and increases for accepted chunks. `detected_language` can be `null` when Groq does not return language metadata. `processing_time_ms` measures backend processing, including provider calls; it is not an end-to-end latency guarantee.
 
+The browser keeps a local UUID for each completed phrase and associates it with the server's per-connection `chunk_id` through its single in-flight request. Local UUIDs are not sent or persisted. `chunk_id` restarts on a new connection. On disconnect, unsent and in-flight phrases are discarded instead of replayed; exactly-once processing cannot be inferred from a dropped connection. Saved-history `request_id` remains the existing server-side idempotency key for explicitly opted-in text history.
+
 New results include `transcription_time_ms` and `translation_time_ms`, measured around the corresponding provider service calls. `processing_time_ms` includes those calls, database checks, and optional history saving. These are server-side measurements; clients should measure from sending a binary chunk to receiving its result for their own total response latency. Retried results served from history omit the provider timings. The configured provider semaphore limits concurrent Groq calls across REST and WebSocket requests in one process.
 
 These stage timings use the backend's monotonic clock and include any wait for its provider concurrency slot and the provider request. They are optional, numeric durations only. No wall-clock timestamp, audio, credential, or user identifier is added for diagnostics. The browser uses its own monotonic clock for capture, WebSocket round trip, and playback. Never subtract a backend clock value from a browser clock value.
+
+At DEBUG log level, the WebSocket handler records numeric WAV validation, result-send, STT/translation, and optional speech-audio send durations tagged with its per-connection `chunk_id`. It does not log audio, transcript text, credentials, cookies, or provider response bodies. The backend cannot include its own result-send completion duration inside the result it has already sent. `speech_audio.preparation_time_ms` measures optional Azure preparation before the WAV is sent; it is a server duration and should not be subtracted from browser timestamps.
 
 When saving is enabled, `result` also includes `"saved":true` and `"message_id":"MESSAGE_UUID"`. Only completed translations are stored; audio is discarded. A failed or silent chunk has no history record. Saved messages can be read at `GET /api/history/{session_id}` and removed with `DELETE /api/history/{session_id}` or `DELETE /api/history` using the REST CSRF header.
 

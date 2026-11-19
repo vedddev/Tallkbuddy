@@ -141,8 +141,14 @@ async def _send_result_and_speech(
     websocket: WebSocket, result: ResultMessage, start: StartMessage,
     db: AsyncSession, token: str, user_id: UUID, settings: Settings,
 ) -> bool:
+    result_send_began = perf_counter()
     if not await _send(websocket, result):
         return False
+    logger.debug(
+        "WebSocket result sent chunk_id=%d processing_ms=%d stt_ms=%s translation_ms=%s send_ms=%d",
+        result.chunk_id, result.processing_time_ms, result.transcription_time_ms,
+        result.translation_time_ms, max(0, int((perf_counter() - result_send_began) * 1000)),
+    )
     if not start.synthesize_speech:
         return True
     began = perf_counter()
@@ -169,10 +175,18 @@ async def _send_result_and_speech(
         return await _send(websocket, SpeechErrorMessage(
             chunk_id=result.chunk_id, code="speech_unavailable", message="Translated speech is unavailable",
         ))
-    return await _send(websocket, SpeechAudioMessage(
+    speech_send_began = perf_counter()
+    sent = await _send(websocket, SpeechAudioMessage(
         chunk_id=result.chunk_id, audio_base64=base64.b64encode(audio).decode("ascii"),
         preparation_time_ms=max(0, int((perf_counter() - began) * 1000)),
     ))
+    if sent:
+        logger.debug(
+            "WebSocket speech audio sent chunk_id=%d tts_ms=%d send_ms=%d",
+            result.chunk_id, max(0, int((speech_send_began - began) * 1000)),
+            max(0, int((perf_counter() - speech_send_began) * 1000)),
+        )
+    return sent
 
 
 async def _process_chunk(
@@ -468,6 +482,7 @@ async def translate_websocket(
                         return
                     continue
 
+                received_at = perf_counter()
                 audio = message.get("bytes")
                 if not isinstance(audio, bytes):
                     if not await _error(websocket, "invalid_message", "Invalid message", True):
@@ -495,6 +510,11 @@ async def translate_websocket(
                     if not await _error(websocket, "invalid_audio", "Invalid or incomplete WAV chunk", True):
                         return
                     continue
+
+                logger.debug(
+                    "WebSocket audio accepted chunk_id=%d bytes=%d validation_ms=%d",
+                    chunk_id + 1, len(audio), max(0, int((perf_counter() - received_at) * 1000)),
+                )
 
                 chunk_id += 1
                 request_id = pending_request_id

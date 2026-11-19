@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import io
+import logging
 import wave
 from time import perf_counter
 from contextlib import asynccontextmanager
@@ -146,6 +147,22 @@ def test_valid_audio_processing(ws_harness: AuthHarness) -> None:
         assert 0 <= result["translation_time_ms"] <= result["processing_time_ms"]
     ws_harness.ws_service.transcribe.assert_awaited_once_with(data, "audio.wav")
     ws_harness.ws_service.translate.assert_awaited_once_with("Hello", "fr")
+
+
+def test_pipeline_debug_timings_do_not_log_speech(ws_harness: AuthHarness, caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.DEBUG, logger="app.ws.translate"):
+        with ws_harness.client.websocket_connect("/ws/translate", headers=ORIGIN) as socket:
+            socket.send_json(START)
+            assert socket.receive_json()["type"] == "ready"
+            socket.send_bytes(wav_chunk())
+            assert socket.receive_json()["type"] == "processing"
+            assert socket.receive_json()["type"] == "result"
+            socket.send_json({"type": "stop"})
+    messages = "\n".join(record.getMessage() for record in caplog.records if record.name == "app.ws.translate")
+    assert "WebSocket audio accepted chunk_id=1" in messages
+    assert "WebSocket result sent chunk_id=1" in messages
+    assert "Hello" not in messages
+    assert "Bonjour" not in messages
 
 
 def test_opt_in_speech_audio_preserves_browser_result_contract(ws_harness: AuthHarness, monkeypatch: pytest.MonkeyPatch) -> None:

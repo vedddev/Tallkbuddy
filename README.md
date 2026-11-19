@@ -1,8 +1,8 @@
 ﻿# TalkBuddy
 
-TalkBuddy is a speech translation application with a FastAPI backend and a React frontend. The backend provides async PostgreSQL, cookie authentication, Groq transcription and translation, WebSocket chunk translation, and opt-in history. The frontend adds a responsive workspace, history, settings, and browser speech playback.
+TalkBuddy is a browser-first speech translation application with a FastAPI backend and a React frontend. The backend provides async PostgreSQL, cookie authentication, Groq transcription and translation, WebSocket phrase translation, optional Azure speech generation, and opt-in text history. The frontend offers a microphone translator and a user-authorized meeting-tab listener with local captions and speech playback.
 
-Phase 9A adds a separate [Windows desktop audio bridge](desktop_bridge/README.md) for playing a PCM WAV file into a user-selected VB-CABLE playback device. The [ten-language registry](shared/languages.json) now drives backend validation and frontend selectors. Browser speech requires a matching installed voice; captions continue when one is unavailable. No live TTS-to-Meet pipeline is connected yet.
+**The browser product requires no desktop bridge, VB-CABLE, Python desktop process, or Windows audio device.** The separate [Windows desktop bridge](desktop_bridge/README.md) is an optional experimental integration. It does not affect browser translation. TalkBuddy does not inject translated audio into Google Meet, Zoom, or other calling applications. The [ten-language registry](shared/languages.json) drives backend validation and frontend selectors; browser speech requires a matching installed voice, while Azure speech is optional and requires backend credentials.
 
 ## Requirements
 
@@ -55,6 +55,10 @@ The backend reads `backend/.env` and process environment variables. Copy `backen
 | `GROQ_TRANSLATION_MODEL` | Groq chat model | `openai/gpt-oss-20b` |
 | `GROQ_TIMEOUT_SECONDS` | Per-request provider timeout | `45` |
 | `GROQ_MAX_RETRIES` | Provider SDK retries for transient errors | `2` |
+| `AZURE_SPEECH_KEY` | Optional Azure translated speech key; keep in private `.env` | Unset |
+| `AZURE_SPEECH_REGION` | Matching Azure Speech resource region | Unset |
+| `TTS_TIMEOUT_SECONDS` | Optional speech-generation timeout | `20` |
+| `TTS_MAX_AUDIO_BYTES` | Maximum generated WAV response | `2097152` (2 MiB) |
 | `AI_MAX_AUDIO_BYTES` | Maximum accepted audio upload | `10485760` (10 MiB) |
 | `AI_MAX_TEXT_CHARS` | Maximum translation input length | `5000` |
 | `AI_MAX_CONCURRENT_PROVIDER_CALLS` | Maximum simultaneous Groq calls per process across REST and WebSockets | `8` |
@@ -158,7 +162,9 @@ npm.cmd run dev
 
 Open `http://127.0.0.1:5173`. Vite proxies `/api` and `/ws` to `VITE_BACKEND_URL` (`http://127.0.0.1:8000` by default), keeping browser cookies and CSRF on one origin. Both local Vite hostnames are allowed automatically in development. For production, serve the frontend and reverse-proxy both paths from the same HTTPS origin. See the [frontend setup and limitations](frontend/README.md). Build with `npm.cmd run build` and test with `npm.cmd test`.
 
-The frontend offers a dedicated [local meeting listener](frontend/README.md#local-meeting-listener) at `/meeting`. It requires an explicit browser tab-audio sharing prompt, groups speech using pause detection, and offers all ten target languages. It speaks on the listener's device only when a matching browser voice is installed; otherwise it continues showing translated captions. It does not broadcast audio into Google Meet.
+The frontend offers a [microphone translator](frontend/README.md#browser-audio-modes) at `/microphone` and a [local meeting listener](frontend/README.md#local-meeting-listener) at `/meeting`. Both require an explicit browser permission prompt, use the same pause-based phrase segmentation, and support all ten target languages. Translated speech plays locally through a matching installed browser voice by default. Users can explicitly choose Azure speech when it is configured on the backend; missing credentials leave captions available through browser-voice mode. Neither mode broadcasts audio into a calling application.
+
+The browser audio path batches capture blocks in AudioWorklet, bounds phrase and WebSocket queues, and cancels local capture/playback promptly on Stop. Expand **Diagnostics** on either audio route for separate caption and playback latency, server STT/translation time, queue depths, and dropped audio. See the [audio architecture](frontend/README.md#browser-audio-modes) and [Windows 11 manual test checklist](frontend/README.md#windows-11-and-chromium-manual-audio-checklist). No real-device latency target or calling-app playback is claimed from automated tests.
 
 ## Tests
 

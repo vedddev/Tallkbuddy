@@ -3,6 +3,11 @@ import type { SocketMessage } from './types'
 /** Browser-monotonic timestamps never leave the client or get compared with server clocks. */
 export interface CaptureTiming {
   speechEndAtMs: number
+  speechStartAtMs?: number | null
+  captureStartedAtMs?: number | null
+  phraseEncodedAtMs?: number
+  encodingMs?: number
+  phraseId?: string
   captureDurationMs: number
 }
 
@@ -14,13 +19,20 @@ export interface SocketRoundTripTiming {
 
 export interface PhraseTimingRecord {
   id: number
+  phraseId: string | null
+  serverChunkId: number
+  captureStartedAtMs: number | null
+  speechStartAtMs: number | null
   speechEndAtMs: number | null
   captureDurationMs: number | null
+  encodingMs: number | null
   speechEndToSubmitMs: number | null
   roundTripMs: number | null
+  captionMs: number | null
   serverProcessingMs: number | null
   sttMs: number | null
   translationMs: number | null
+  ttsMs: number | null
   browserPreparationMs: number | null
   queueWaitMs: number | null
   playbackStartDelayMs: number | null
@@ -46,13 +58,20 @@ export function timingRecord(
   const end = socket?.capture?.speechEndAtMs
   return {
     id,
+    phraseId: socket?.capture?.phraseId ?? null,
+    serverChunkId: result.chunk_id,
+    captureStartedAtMs: validMs(socket?.capture?.captureStartedAtMs),
+    speechStartAtMs: validMs(socket?.capture?.speechStartAtMs),
     speechEndAtMs: end != null && Number.isFinite(end) ? end : null,
     captureDurationMs: validMs(socket?.capture?.captureDurationMs),
+    encodingMs: validMs(socket?.capture?.encodingMs),
     speechEndToSubmitMs: durationMs(end, socket?.submittedAtMs),
     roundTripMs: durationMs(socket?.submittedAtMs, socket?.receivedAtMs),
+    captionMs: durationMs(end, socket?.receivedAtMs),
     serverProcessingMs: validMs(result.processing_time_ms),
     sttMs: validMs(result.transcription_time_ms),
     translationMs: validMs(result.translation_time_ms),
+    ttsMs: null,
     browserPreparationMs: null,
     queueWaitMs: null,
     playbackStartDelayMs: null,
@@ -75,11 +94,15 @@ export function percentile(values: number[], fraction: number): number | null {
 
 export function latencySummary(records: PhraseTimingRecord[]) {
   const complete = records.map((record) => record.totalMs).filter((value): value is number => value !== null && Number.isFinite(value) && value >= 0)
+  const captions = records.map((record) => record.captionMs).filter((value): value is number => value !== null && Number.isFinite(value) && value >= 0)
   return {
     lastMs: records.at(-1)?.totalMs ?? null,
     completeCount: complete.length,
     averageMs: complete.length ? complete.reduce((sum, value) => sum + value, 0) / complete.length : null,
     p50Ms: percentile(complete, 0.5),
     p95Ms: percentile(complete, 0.95),
+    captionAverageMs: captions.length ? captions.reduce((sum, value) => sum + value, 0) / captions.length : null,
+    captionP50Ms: percentile(captions, 0.5),
+    captionP95Ms: percentile(captions, 0.95),
   }
 }

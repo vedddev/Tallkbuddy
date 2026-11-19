@@ -18,6 +18,7 @@ function currentPage(pathname: string, hash: string) {
   if (pathname.startsWith('/history')) return pathname === '/history' ? { title: 'History', parent: '' } : { title: 'Session details', parent: 'History' }
   if (pathname === '/settings') return { title: 'Settings', parent: '' }
   if (pathname === '/meeting' || hash === '#meeting') return { title: 'Live Meeting', parent: 'Workspace' }
+  if (pathname === '/microphone') return { title: 'Microphone Translator', parent: 'Workspace' }
   if (pathname === '/translate' || hash === '#translate') return { title: 'Translate', parent: 'Workspace' }
   if (pathname === '/workspace') return { title: 'Microphone translation', parent: 'Translate' }
   return { title: 'Overview', parent: '' }
@@ -25,6 +26,7 @@ function currentPage(pathname: string, hash: string) {
 
 function isActive(to: string, pathname: string) {
   if (to === '/translate') return pathname === '/translate' || pathname === '/workspace'
+  if (to === '/meeting' && pathname === '/microphone') return true
   return pathname === to || (to === '/history' && pathname.startsWith('/history/'))
 }
 
