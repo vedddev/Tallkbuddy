@@ -12,6 +12,7 @@ from desktop_bridge.wav_player import (
     adapt_channels,
     load_pcm_wav,
     play_wav,
+    play_wav_bytes,
     resample_audio,
     write_test_wav,
 )
@@ -78,6 +79,18 @@ def test_plays_to_explicit_cable_input_with_rate_conversion(tmp_path: Path) -> N
     assert data.shape == (1200, 2)
     assert options == {"samplerate": 48000, "device": 7, "blocking": True}
     assert backend.calls[0]["device"] == 7
+
+
+def test_plays_in_memory_24khz_speech_wav_to_cable_at_48khz(tmp_path: Path) -> None:
+    path = tmp_path / "generated.wav"
+    make_wav(path, 2, 1, [0, 1000, -1000, 0] * 100, rate=24000)
+    backend = FakePlaybackBackend()
+    cable = AudioDevice(14, "CABLE Input", 0, 2, 48000)
+    audio = play_wav_bytes(path.read_bytes(), cable, backend=backend)
+    assert audio.sample_rate == 24000
+    data, options = backend.played
+    assert data.shape == (800, 2)
+    assert options["device"] == 14
 
 
 def test_rejects_recording_device_and_oversized_wav(tmp_path: Path) -> None:

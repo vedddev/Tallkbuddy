@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     groq_translation_model: str = "openai/gpt-oss-20b"
     groq_timeout_seconds: float = Field(default=45.0, ge=1.0, le=120.0)
     groq_max_retries: int = Field(default=2, ge=0, le=3)
+    azure_speech_key: SecretStr | None = None
+    azure_speech_region: str | None = None
+    tts_timeout_seconds: float = Field(default=20.0, ge=1.0, le=60.0)
+    tts_max_audio_bytes: int = Field(default=2 * 1024 * 1024, ge=1024, le=10 * 1024 * 1024)
     ai_max_audio_bytes: int = Field(default=10 * 1024 * 1024, ge=1, le=25_000_000)
     ai_max_text_chars: int = Field(default=5000, ge=1, le=20000)
     ai_max_concurrent_provider_calls: int = Field(default=8, ge=1, le=100)

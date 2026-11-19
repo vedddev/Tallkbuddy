@@ -47,6 +47,18 @@ To end the connection, send:
 
 The server processes messages sequentially. A `stop` already queued behind an in-flight chunk takes effect after that chunk finishes, then the server closes with code `1000`.
 
+### Optional desktop speech audio (Phase 10D)
+
+The existing browser protocol remains unchanged. A desktop client can add `"synthesize_speech":true` to `start`. This requires `AZURE_SPEECH_KEY` and `AZURE_SPEECH_REGION` on the backend; without them the server returns a recoverable `speech_unavailable` error instead of `ready`. The client must still authenticate using the session cookie and send an allowed `Origin` header. Desktop clients can obtain an in-memory session with the existing `/api/auth/login` endpoint; no token belongs in a URL. Remote desktop connections require HTTPS/WSS and trusted TLS certificates.
+
+After each `result`, an opted-in client receives exactly one further JSON message with the same `chunk_id`: either `speech_audio` or `speech_error`. Wait for it before sending the next WAV phrase to preserve playback order. Speech audio is **generated translated speech**, never microphone audio:
+
+```json
+{"type":"speech_audio","chunk_id":1,"audio_format":"wav","audio_base64":"...","preparation_time_ms":420}
+```
+
+The decoded audio is 24 kHz, mono, 16-bit PCM WAV, capped at `TTS_MAX_AUDIO_BYTES` (default 2 MiB) and 30 seconds. `speech_error` contains `type`, `chunk_id`, `code`, and a generic `message`; translated text in the preceding `result` remains usable. TTS text is capped at 500 characters. Speech synthesis is an optional Azure Speech service call, so provider availability, voice availability, billing, and latency are separate from Groq translation. No audio is saved. Browsers that omit `synthesize_speech` receive no extra messages.
+
 ## Server messages
 
 After valid `start`:

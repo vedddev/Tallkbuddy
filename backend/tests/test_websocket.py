@@ -1,6 +1,7 @@
 """Authenticated, sequential WebSocket translation protocol tests."""
 
 import asyncio
+import base64
 import io
 import wave
 from time import perf_counter
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from pydantic import SecretStr
 from sqlalchemy import select
 from starlette.websockets import WebSocketDisconnect
 
@@ -144,6 +146,60 @@ def test_valid_audio_processing(ws_harness: AuthHarness) -> None:
         assert 0 <= result["translation_time_ms"] <= result["processing_time_ms"]
     ws_harness.ws_service.transcribe.assert_awaited_once_with(data, "audio.wav")
     ws_harness.ws_service.translate.assert_awaited_once_with("Hello", "fr")
+
+
+def test_opt_in_speech_audio_preserves_browser_result_contract(ws_harness: AuthHarness, monkeypatch: pytest.MonkeyPatch) -> None:
+    ws_harness.client.app.state.settings.azure_speech_key = SecretStr("test-only")
+    ws_harness.client.app.state.settings.azure_speech_region = "eastus"
+    async def fake_speech(text, language, _settings):
+        assert (text, language) == ("Bonjour", "fr")
+        return wav_chunk()
+
+    monkeypatch.setattr("app.ws.translate.synthesize_wav", fake_speech)
+    with ws_harness.client.websocket_connect("/ws/translate", headers=ORIGIN) as socket:
+        socket.send_json({**START, "synthesize_speech": True})
+        assert socket.receive_json()["type"] == "ready"
+        socket.send_bytes(wav_chunk())
+        assert socket.receive_json()["type"] == "processing"
+        result = socket.receive_json()
+        assert result["type"] == "result"
+        assert "audio_base64" not in result
+        speech = socket.receive_json()
+        assert speech["type"] == "speech_audio"
+        assert speech["chunk_id"] == result["chunk_id"]
+        assert base64.b64decode(speech["audio_base64"]) == wav_chunk()
+        assert speech["preparation_time_ms"] >= 0
+
+
+def test_opt_in_speech_failure_has_no_audio(ws_harness: AuthHarness, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.ai.tts import TTSError
+    ws_harness.client.app.state.settings.azure_speech_key = SecretStr("test-only")
+    ws_harness.client.app.state.settings.azure_speech_region = "eastus"
+
+    async def unavailable(*_args):
+        raise TTSError("provider details")
+
+    monkeypatch.setattr("app.ws.translate.synthesize_wav", unavailable)
+    with ws_harness.client.websocket_connect("/ws/translate", headers=ORIGIN) as socket:
+        socket.send_json({**START, "synthesize_speech": True})
+        socket.receive_json()
+        socket.send_bytes(wav_chunk())
+        assert socket.receive_json()["type"] == "processing"
+        assert socket.receive_json()["type"] == "result"
+        speech_error = socket.receive_json()
+        assert speech_error == {"type": "speech_error", "chunk_id": 1,
+                                "code": "speech_unavailable", "message": "Translated speech is unavailable"}
+
+
+def test_opt_in_speech_requires_configuration_before_recording(ws_harness: AuthHarness) -> None:
+    ws_harness.client.app.state.settings.azure_speech_key = None
+    ws_harness.client.app.state.settings.azure_speech_region = None
+    with ws_harness.client.websocket_connect("/ws/translate", headers=ORIGIN) as socket:
+        socket.send_json({**START, "synthesize_speech": True})
+        assert socket.receive_json() == {"type": "error", "code": "speech_unavailable",
+                                         "message": "Speech service is not configured", "recoverable": True}
+        socket.send_json(START)
+        assert socket.receive_json()["type"] == "ready"
 
 
 def test_websocket_reports_separate_mocked_stage_and_client_latency(ws_harness: AuthHarness) -> None:

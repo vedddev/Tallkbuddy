@@ -1,6 +1,7 @@
 """Decode PCM WAV and play it into an explicitly selected output device."""
 
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 import math
@@ -45,15 +46,12 @@ def _decode_pcm(raw: bytes, sample_width: int) -> np.ndarray:
     raise WavError("Only 8-, 16-, 24-, and 32-bit integer PCM WAV files are supported.")
 
 
-def load_pcm_wav(path: str | Path, config: BridgeConfig | None = None) -> PcmAudio:
+def load_pcm_wav_bytes(data: bytes, config: BridgeConfig | None = None) -> PcmAudio:
     config = config or BridgeConfig()
-    wav_path = Path(path)
-    if not wav_path.is_file():
-        raise WavError(f"WAV file not found: {wav_path}")
-    if wav_path.stat().st_size > config.max_wav_bytes:
+    if len(data) > config.max_wav_bytes:
         raise WavError("WAV file exceeds the configured size limit.")
     try:
-        with wave.open(str(wav_path), "rb") as reader:
+        with wave.open(BytesIO(data), "rb") as reader:
             channels = reader.getnchannels()
             rate = reader.getframerate()
             width = reader.getsampwidth()
@@ -72,6 +70,16 @@ def load_pcm_wav(path: str | Path, config: BridgeConfig | None = None) -> PcmAud
     except (wave.Error, EOFError) as exc:
         raise WavError("Invalid or unsupported WAV file; use uncompressed integer PCM.") from exc
     return PcmAudio(_decode_pcm(raw, width).reshape(frames, channels), rate)
+
+
+def load_pcm_wav(path: str | Path, config: BridgeConfig | None = None) -> PcmAudio:
+    config = config or BridgeConfig()
+    wav_path = Path(path)
+    if not wav_path.is_file():
+        raise WavError(f"WAV file not found: {wav_path}")
+    if wav_path.stat().st_size > config.max_wav_bytes:
+        raise WavError("WAV file exceeds the configured size limit.")
+    return load_pcm_wav_bytes(wav_path.read_bytes(), config)
 
 
 def resample_audio(samples: np.ndarray, source_rate: int, output_rate: int) -> np.ndarray:
@@ -104,6 +112,16 @@ def adapt_channels(samples: np.ndarray, output_channels: int) -> np.ndarray:
 def play_wav(path: str | Path, device: AudioDevice, config: BridgeConfig | None = None, backend: Any | None = None) -> PcmAudio:
     config = config or BridgeConfig()
     audio = load_pcm_wav(path, config)
+    return play_pcm_audio(audio, device, backend)
+
+
+def play_wav_bytes(data: bytes, device: AudioDevice, config: BridgeConfig | None = None,
+                   backend: Any | None = None) -> PcmAudio:
+    audio = load_pcm_wav_bytes(data, config)
+    return play_pcm_audio(audio, device, backend)
+
+
+def play_pcm_audio(audio: PcmAudio, device: AudioDevice, backend: Any | None = None) -> PcmAudio:
     backend = backend or sounddevice_backend()
     if device.output_channels < 1:
         raise PlaybackError("The selected device is not a playback output. Select CABLE Input, not CABLE Output.")

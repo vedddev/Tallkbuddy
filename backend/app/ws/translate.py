@@ -1,6 +1,7 @@
 """Sequential, authenticated translation of complete WAV messages."""
 
 import asyncio
+import base64
 import json
 import logging
 from contextlib import AsyncExitStack
@@ -21,6 +22,7 @@ from app.ai.service import (
     AIService,
     ai_service_context,
 )
+from app.ai.tts import TTSError, synthesize_wav, tts_configured
 from app.auth.security import SESSION_COOKIE_NAME
 from app.auth.service import find_active_session
 from app.core.config import Settings
@@ -43,6 +45,8 @@ from app.ws.protocol import (
     ProcessingMessage,
     ReadyMessage,
     ResultMessage,
+    SpeechAudioMessage,
+    SpeechErrorMessage,
     StartMessage,
     StopMessage,
 )
@@ -133,6 +137,44 @@ async def _history_error(websocket: WebSocket, exc: Exception) -> bool:
     return await _error(websocket, "storage_unavailable", "History storage unavailable", True)
 
 
+async def _send_result_and_speech(
+    websocket: WebSocket, result: ResultMessage, start: StartMessage,
+    db: AsyncSession, token: str, user_id: UUID, settings: Settings,
+) -> bool:
+    if not await _send(websocket, result):
+        return False
+    if not start.synthesize_speech:
+        return True
+    began = perf_counter()
+    try:
+        async with asyncio.timeout(settings.tts_timeout_seconds + 2):
+            async with websocket.app.state.ai_provider_slots:
+                audio = await synthesize_wav(result.translated, result.target_language, settings)
+        if await _active_user_id(db, token) != user_id:
+            await _error(websocket, "session_invalid", "Session is no longer valid", False)
+            await _close(websocket, 1008)
+            return False
+    except (TTSError, TimeoutError) as exc:
+        logger.warning("WebSocket speech synthesis unavailable (%s)", type(exc).__name__)
+        return await _send(websocket, SpeechErrorMessage(
+            chunk_id=result.chunk_id, code="speech_unavailable", message="Translated speech is unavailable",
+        ))
+    except SQLAlchemyError as exc:
+        logger.warning("WebSocket session check failed (%s)", type(exc).__name__)
+        await _error(websocket, "session_check_failed", "Session check failed", False)
+        await _close(websocket, 1011)
+        return False
+    except Exception as exc:
+        logger.warning("WebSocket speech synthesis failed (%s)", type(exc).__name__)
+        return await _send(websocket, SpeechErrorMessage(
+            chunk_id=result.chunk_id, code="speech_unavailable", message="Translated speech is unavailable",
+        ))
+    return await _send(websocket, SpeechAudioMessage(
+        chunk_id=result.chunk_id, audio_base64=base64.b64encode(audio).decode("ascii"),
+        preparation_time_ms=max(0, int((perf_counter() - began) * 1000)),
+    ))
+
+
 async def _process_chunk(
     websocket: WebSocket,
     db: AsyncSession,
@@ -182,7 +224,7 @@ async def _process_chunk(
                 await _close(websocket, 1008)
                 return False
             message_id, original, translated, detected = cached
-            return await _send(
+            return await _send_result_and_speech(
                 websocket,
                 ResultMessage(
                     chunk_id=chunk_id,
@@ -194,6 +236,7 @@ async def _process_chunk(
                     saved=True,
                     message_id=message_id,
                 ),
+                start, db, token, user_id, settings,
             )
 
     try:
@@ -252,7 +295,7 @@ async def _process_chunk(
         return False
 
     elapsed_ms = max(0, int((perf_counter() - began) * 1000))
-    return await _send(
+    return await _send_result_and_speech(
         websocket,
         ResultMessage(
             chunk_id=chunk_id,
@@ -266,6 +309,7 @@ async def _process_chunk(
             saved=True if start.save_history else None,
             message_id=message_id,
         ),
+        start, db, token, user_id, settings,
     )
 
 
@@ -370,6 +414,10 @@ async def translate_websocket(
                             continue
                         if not parsed.save_history and parsed.session_id is not None:
                             if not await _error(websocket, "invalid_start", "session_id requires saving", True):
+                                return
+                            continue
+                        if parsed.synthesize_speech and not tts_configured(settings):
+                            if not await _error(websocket, "speech_unavailable", "Speech service is not configured", True):
                                 return
                             continue
                         if parsed.save_history:

@@ -1,6 +1,42 @@
-# TalkBuddy desktop audio bridge — Phase 10B
+# TalkBuddy desktop audio bridge — Phase 10D
 
-This separate Windows command-line tool lists audio devices and plays an existing, uncompressed integer PCM WAV file into a selected playback device. It does not capture meeting audio, synthesize speech, call Groq, join Google Meet, or change Windows default devices. The intended playback device is **CABLE Input** (the playback side of VB-CABLE). Google Meet must use **CABLE Output** (the recording side) as its microphone. VB-Audio describes this direction in its [VB-CABLE reference manual](https://vb-audio.com/Cable/VBCABLE_ReferenceManual.pdf).
+This separate Windows command-line tool lists audio devices, plays existing PCM WAV files, captures phrases from an explicitly selected microphone, and can send those phrases to the authenticated TalkBuddy backend for translation and optional generated speech. Raw microphone audio is never sent to the virtual playback device or saved locally. The bridge does not join calls or change Windows defaults. The playback device for VB-CABLE routing is **CABLE Input**; **CABLE Output** is its recording side.
+
+## Explicit microphone capture
+
+List devices first. Choose the current numeric index of your physical microphone with `in=1` or greater. Indices can change after reboot or device reconnection. The listing includes host API and default sample rate.
+
+```powershell
+.\desktop_bridge\.venv\Scripts\python.exe -m desktop_bridge.main devices
+.\desktop_bridge\.venv\Scripts\python.exe -m desktop_bridge.main diagnose-mic --device MICROPHONE_INDEX
+.\desktop_bridge\.venv\Scripts\python.exe -m desktop_bridge.main capture --device MICROPHONE_INDEX --duration 30 --diagnostics
+```
+
+`diagnose-mic` briefly opens only the selected input index. It reports the sounddevice and PortAudio versions, native sample rate, host API, tested channel/rate combinations, settings checks, actual stream-open results, callback frame counts, and numeric driver error codes. It does not save samples. A settings check alone cannot prove that a stream opens or delivers frames. Exit code 0 means at least one tested format delivered frames; 2 means none did. Choose another index explicitly if the same microphone appears under a different host API; the bridge never silently changes devices. For PortAudio `-9996` or `-9999`, check Windows microphone privacy, device availability, driver state, and exclusive-mode use.
+
+Omit `--duration` to continue until Ctrl+C. `--diagnostics` prints audio level, speech/silence, phrase count, and dropped frames at most once per second. The command prints a completion summary and discards every emitted WAV after reporting metadata. It never falls back to the Windows default microphone. If Windows privacy settings block microphone access, enable microphone access for desktop apps and retry. If the stream disconnects, list devices again and choose its current index. `CABLE Output` is rejected unless `--allow-virtual-input` is also given; that flag is only for explicit virtual-source testing.
+
+Optional segmentation controls: `--min-phrase 0.6`, `--max-phrase 12`, and `--silence 0.7` (seconds). The engine uses a lightweight adaptive RMS voice gate: 120 ms speech onset, 250 ms pre-speech padding, 700 ms end silence, at least 600 ms voiced speech, and 150 ms trailing padding. A phrase that exceeds the maximum without a brief silence is discarded to avoid an arbitrary mid-word cut; the summary counts these drops. Loud continuous background noise may prevent useful segmentation. This is an energy gate, not a trained speech detector.
+
+PortAudio first probes the selected device's native sample rate and mono or stereo input capabilities with a short, input-only stream. It selects the first format that actually delivers frames. When stereo is required, it copies bounded callback blocks and downmixes to mono outside the audio callback. A bounded queue transfers blocks to the main thread; overflow resets the current phrase rather than emitting corrupted audio. Completed phrases become 16 kHz, mono, 16-bit PCM WAV bytes in memory. Each has a UUID, capture duration, and local monotonic speech-end and emission timestamps. No phrase audio or speech text appears in logs. Ctrl+C closes the input stream and clears queued data. The standalone `capture` command discards phrases and does not feed playback or loopback.
+
+## Live translated speech into VB-CABLE (Phase 10D)
+
+This mode starts only when you run `translate-live`. It prompts for your TalkBuddy email and password, uses the existing login endpoint, holds the HTTP-only session cookie in memory, and sends it only in the authenticated WebSocket handshake. The backend's Origin check remains active. Shutdown attempts to revoke the desktop session through the existing logout endpoint; if the backend is unreachable, that session expires under the backend's normal policy. Do not pass credentials in the command line, URL, or environment. Remote servers require HTTPS/WSS with normal TLS verification.
+
+Configure Azure Speech on the **backend** in `backend/.env` with `AZURE_SPEECH_KEY` and `AZURE_SPEECH_REGION` for generated translated speech. The existing Groq key covers transcription and translation, but Groq/browser `speechSynthesis` does not supply a PCM WAV reply for desktop playback. Azure Speech is an additional paid provider; check its service availability and pricing before live use. Its output is requested as 24 kHz mono, 16-bit PCM WAV and resampled for the selected cable device. Start the backend using its usual command, then list the **current** device indices. Select a physical microphone for `--mic` and **CABLE Input** for `--output`:
+
+```powershell
+.\desktop_bridge\.venv\Scripts\python.exe -m pip install -r .\desktop_bridge\requirements.txt
+.\desktop_bridge\.venv\Scripts\python.exe -m desktop_bridge.main devices
+.\desktop_bridge\.venv\Scripts\python.exe -m desktop_bridge.main translate-live --mic MIC_INDEX --output CABLE_INPUT_INDEX --source en --target hi --server http://127.0.0.1:8000 --diagnostics
+```
+
+Use `--source auto` (the default) for Whisper language detection. All ten codes in `shared/languages.json` are accepted by the translation service; speech output depends on the configured Azure resource and its voices. The command does not create a history record by default. To opt in, first enable history in your TalkBuddy preferences and create an owned translation session, then add `--save-history --session-id SESSION_UUID`. Phrase UUIDs are reused as request IDs for idempotent saving. Without both flags, saving stays off.
+
+In a Windows terminal, press **P** to pause capture (frames are discarded locally), **R** to resume, **Q** or Ctrl+C to stop. The optional `--duration 30` stops capture after 30 seconds. Only **generated translated speech** is passed to CABLE Input. The bridge never sends raw microphone audio to the playback function. It processes one phrase at a time, keeps at most three pending phrases, and drops excess backlog rather than growing memory. After a long quiet interval or resume, it opens a fresh authenticated socket before sending another phrase; it never silently resubmits a phrase whose outcome is uncertain. A provider or connection failure stops the session; failed phrases are not automatically replayed. Device indices can change between runs. CABLE Output is selected as a microphone inside your calling application, never as `--output` here. Do not use CABLE Output as `--mic` because it creates a feedback path.
+
+Diagnostics report local capture duration, speech-end to WebSocket submission, result round trip, server STT and translation durations, server TTS preparation, local playback queue wait, and speech-end to the call that starts virtual playback. They do not measure acoustic playback onset or remote participant hearing. Raw audio and recognized or translated words are not printed. This feature has not been verified in a live call merely by automated tests; manually check Windows CABLE Output activity and obtain remote-participant confirmation before claiming broadcast success.
 
 ## Setup in PowerShell
 

@@ -17,6 +17,7 @@ class StartMessage(BaseModel):
     audio_format: Literal["wav"]
     save_history: bool = False
     session_id: UUID | None = None
+    synthesize_speech: bool = False
 
     @field_validator("target_language")
     @classmethod
@@ -73,3 +74,18 @@ class ErrorMessage(BaseModel):
     code: str
     message: str
     recoverable: bool
+
+
+class SpeechAudioMessage(BaseModel):
+    type: Literal["speech_audio"] = "speech_audio"
+    chunk_id: int
+    audio_format: Literal["wav"] = "wav"
+    audio_base64: str
+    preparation_time_ms: int
+
+
+class SpeechErrorMessage(BaseModel):
+    type: Literal["speech_error"] = "speech_error"
+    chunk_id: int
+    code: str
+    message: str
