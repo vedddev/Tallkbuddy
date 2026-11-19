@@ -131,7 +131,8 @@ def test_engine_has_bounded_pool_and_command_timeout(monkeypatch: pytest.MonkeyP
         database_session.get_engine.cache_clear()
 
 
-def test_database_health_succeeds_with_available_session() -> None:
+@pytest.mark.parametrize("path", ["/api/health/db", "/api/health/ready"])
+def test_database_health_succeeds_with_available_session(path: str) -> None:
     fake = FakeSession()
 
     async def override_session():
@@ -140,7 +141,7 @@ def test_database_health_succeeds_with_available_session() -> None:
     app.dependency_overrides[database_session.get_db_session] = override_session
     try:
         with TestClient(app) as client:
-            response = client.get("/api/health/db")
+            response = client.get(path)
     finally:
         app.dependency_overrides.clear()
 
@@ -149,7 +150,8 @@ def test_database_health_succeeds_with_available_session() -> None:
     assert fake.statements == ["SELECT 1"]
 
 
-def test_database_health_hides_connection_error() -> None:
+@pytest.mark.parametrize("path", ["/api/health/db", "/api/health/ready"])
+def test_database_health_hides_connection_error(path: str) -> None:
     fake = FakeSession(RuntimeError("private connection details"))
 
     async def override_session():
@@ -158,7 +160,7 @@ def test_database_health_hides_connection_error() -> None:
     app.dependency_overrides[database_session.get_db_session] = override_session
     try:
         with TestClient(app) as client:
-            response = client.get("/api/health/db")
+            response = client.get(path)
     finally:
         app.dependency_overrides.clear()
 
@@ -167,13 +169,14 @@ def test_database_health_hides_connection_error() -> None:
     assert "private connection details" not in response.text
 
 
-def test_database_health_without_configuration_returns_503(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("path", ["/api/health/db", "/api/health/ready"])
+def test_database_health_without_configuration_returns_503(monkeypatch: pytest.MonkeyPatch, path: str) -> None:
     def unavailable_sessionmaker() -> None:
         raise database_session.DatabaseConfigurationError("private database URL")
 
     monkeypatch.setattr(database_session, "get_sessionmaker", unavailable_sessionmaker)
     with TestClient(app) as client:
-        response = client.get("/api/health/db")
+        response = client.get(path)
 
     assert response.status_code == 503
     assert response.json() == {"detail": "Database unavailable"}

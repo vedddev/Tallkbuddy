@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+from time import perf_counter
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -13,6 +14,7 @@ from starlette.requests import HTTPConnection
 from app.ai.languages import LANGUAGE_NAMES, normalize_detected_language, whisper_language_code
 from app.ai.schemas import TranscriptionResponse, TranslationResponse
 from app.core.config import Settings
+from app.core.observability import OperationalMetrics
 
 
 logger = logging.getLogger(__name__)
@@ -87,16 +89,20 @@ def _log_provider_error(operation: str, exc: APIError) -> None:
     logger.warning(
         "Groq %s failed category=%s status=%s code=%s exception=%s",
         operation, category, status, code, type(exc).__name__,
+        extra={"operation": operation, "provider_category": category,
+               "status": status or 0, "error_category": "provider_error"},
     )
 
 
 class AIService:
     """Small adapter that keeps provider details out of HTTP routes."""
 
-    def __init__(self, client: AsyncGroq, settings: Settings, provider_slots: asyncio.Semaphore | None = None) -> None:
+    def __init__(self, client: AsyncGroq, settings: Settings, provider_slots: asyncio.Semaphore | None = None,
+                 metrics: OperationalMetrics | None = None) -> None:
         self.client = client
         self.settings = settings
         self.provider_slots = provider_slots
+        self.metrics = metrics
 
     @asynccontextmanager
     async def _provider_slot(self) -> AsyncIterator[None]:
@@ -108,6 +114,8 @@ class AIService:
                 self.provider_slots.acquire(), timeout=self.settings.ai_provider_queue_timeout_seconds
             )
         except TimeoutError:
+            if self.metrics is not None:
+                self.metrics.increment("queue_overflows")
             raise AIProviderUnavailable("AI provider capacity exhausted") from None
         try:
             yield
@@ -119,6 +127,7 @@ class AIService:
     ) -> TranscriptionResponse:
         if not audio:
             raise AIInputError("Empty audio")
+        began = perf_counter()
         try:
             options = {"language": whisper_language_code(source_language)} if source_language else {}
             async with self._provider_slot():
@@ -137,6 +146,9 @@ class AIService:
         except APIError as exc:
             _log_provider_error("transcription", exc)
             raise AIProviderFailure from None
+        finally:
+            if self.metrics is not None:
+                self.metrics.observe("stt", (perf_counter() - began) * 1000)
 
         text = getattr(result, "text", None)
         if not isinstance(text, str) or not text.strip():
@@ -155,6 +167,7 @@ class AIService:
             {"target_language": LANGUAGE_NAMES[target_language], "source_text": text},
             ensure_ascii=False,
         )
+        began = perf_counter()
         try:
             async with self._provider_slot():
                 result = await self.client.chat.completions.create(
@@ -175,6 +188,9 @@ class AIService:
         except APIError as exc:
             _log_provider_error("translation", exc)
             raise AIProviderFailure from None
+        finally:
+            if self.metrics is not None:
+                self.metrics.observe("translation", (perf_counter() - began) * 1000)
 
         choices = getattr(result, "choices", None)
         if not choices:
@@ -221,4 +237,5 @@ async def get_ai_service(connection: HTTPConnection) -> AsyncIterator[AIService]
     async with ai_service_context(
         connection.app.state.settings, connection.app.state.ai_provider_slots
     ) as service:
+        service.metrics = connection.app.state.metrics
         yield service

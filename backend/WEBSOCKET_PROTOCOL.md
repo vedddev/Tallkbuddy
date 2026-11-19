@@ -7,7 +7,7 @@ The React local meeting listener uses this existing protocol. Browser tab captur
 ## Authentication and handshake
 
 1. Log in through `POST /api/auth/login` first. The browser sends the HTTP-only `talkbuddy_session` cookie during the WebSocket handshake. Do not put a token or user ID in the URL or message body.
-2. The client must send an `Origin` header. It must match the WebSocket server's own origin or one of the exact origins in `CORS_ORIGINS`. Browsers set this header automatically. The REST `X-CSRF-Token` header is not used for WebSockets.
+2. The client must send an `Origin` header. In production it must match configured `PUBLIC_ORIGIN` (the same HTTPS origin that serves the frontend and proxies `/ws`). Development also accepts the configured exact origins. Browsers set this header automatically. The REST `X-CSRF-Token` header is not used for WebSockets. The server never trusts a supplied `Host` header as the production origin.
 3. The server checks the database session before accepting the connection. It rechecks the session on every received message and before and after translation. Expired or revoked sessions are closed.
 4. At most `WS_MAX_CONNECTIONS_PER_USER` sockets per user are allowed in one server process.
 

@@ -10,7 +10,9 @@ TalkBuddy is a browser-first speech translation application with a FastAPI backe
 - PostgreSQL for database setup and `/api/health/db`
 - A Groq API key for the `/api/ai/*` endpoints
 
-The API can start and `/api/health` works without PostgreSQL. `/api/health/db` returns HTTP 503 until the database is configured and reachable.
+In development, the API can start and `/api/health` works without PostgreSQL. `/api/health/db` and `/api/health/ready` return HTTP 503 until the database is configured and reachable. Production startup requires valid PostgreSQL and Groq configuration plus an explicit HTTPS public origin.
+
+For deployment, migration, backup, monitoring, smoke testing, and release gates, use the [Phase 13 production readiness guide](docs/PRODUCTION_READINESS.md). The GitHub Actions workflow runs tests and build checks; it does not deploy. A passing automated suite does not verify real microphone or meeting audio.
 
 ## Install and run
 
@@ -39,6 +41,7 @@ The backend reads `backend/.env` and process environment variables. Copy `backen
 | `APP_ENV` | Runtime environment | `development` |
 | `LOG_LEVEL` | Application log level | `INFO` |
 | `CORS_ORIGINS` | Allowed CORS origins as a JSON array | `[]` |
+| `PUBLIC_ORIGIN` | Exact HTTPS browser origin required in production; frontend and proxied `/api` and `/ws` share it | Unset |
 | `DATABASE_URL` | Async PostgreSQL connection URL | Unset |
 | `DATABASE_POOL_SIZE` | Pooled PostgreSQL connections per process | `5` |
 | `DATABASE_MAX_OVERFLOW` | Temporary extra connections per process | `5` |

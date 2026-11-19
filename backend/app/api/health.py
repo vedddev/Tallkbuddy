@@ -40,3 +40,10 @@ async def get_database_health(session: AsyncSession = Depends(get_db_session)) -
             detail="Database unavailable",
         ) from None
     return HealthResponse(status="ok")
+
+
+@router.get("/health/ready", response_model=HealthResponse)
+async def get_readiness(session: AsyncSession = Depends(get_db_session)) -> HealthResponse:
+    """Ready only when the required local PostgreSQL dependency responds."""
+
+    return await get_database_health(session)

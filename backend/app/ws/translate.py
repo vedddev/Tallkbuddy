@@ -6,7 +6,7 @@ import json
 import logging
 from contextlib import AsyncExitStack
 from time import perf_counter
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, ValidationError
@@ -26,6 +26,7 @@ from app.ai.tts import TTSError, synthesize_wav, tts_configured
 from app.auth.security import SESSION_COOKIE_NAME
 from app.auth.service import find_active_session
 from app.core.config import Settings
+from app.core.observability import chunk_id_context, websocket_id_context
 from app.db.session import get_db_session
 from app.history.service import (
     HistoryConflict,
@@ -76,6 +77,13 @@ async def _send(websocket: WebSocket, message: BaseModel) -> bool:
 async def _error(
     websocket: WebSocket, code: str, message: str, recoverable: bool
 ) -> bool:
+    metrics = getattr(websocket.app.state, "metrics", None)
+    if metrics is not None:
+        metrics.increment("ws_errors")
+        if code in {"provider_timeout", "processing_timeout"}:
+            metrics.increment("provider_timeouts")
+        elif code in {"provider_unavailable", "provider_error"}:
+            metrics.increment("provider_errors")
     return await _send(
         websocket, ErrorMessage(code=code, message=message, recoverable=recoverable)
     )
@@ -104,7 +112,7 @@ def _origin_allowed(websocket: WebSocket, settings: Settings) -> bool:
     if not origin or not host:
         return False
     own_scheme = "https" if websocket.url.scheme == "wss" else "http"
-    own_origin = f"{own_scheme}://{host}"
+    own_origin = settings.public_origin if settings.app_env == "production" else f"{own_scheme}://{host}"
     return origin == own_origin or origin in settings.allowed_origins
 
 
@@ -152,6 +160,7 @@ async def _send_result_and_speech(
     if not start.synthesize_speech:
         return True
     began = perf_counter()
+    metrics = websocket.app.state.metrics
     try:
         async with asyncio.timeout(settings.tts_timeout_seconds + 2):
             async with websocket.app.state.ai_provider_slots:
@@ -161,6 +170,7 @@ async def _send_result_and_speech(
             await _close(websocket, 1008)
             return False
     except (TTSError, TimeoutError) as exc:
+        metrics.increment("provider_errors")
         logger.warning("WebSocket speech synthesis unavailable (%s)", type(exc).__name__)
         return await _send(websocket, SpeechErrorMessage(
             chunk_id=result.chunk_id, code="speech_unavailable", message="Translated speech is unavailable",
@@ -171,10 +181,13 @@ async def _send_result_and_speech(
         await _close(websocket, 1011)
         return False
     except Exception as exc:
+        metrics.increment("provider_errors")
         logger.warning("WebSocket speech synthesis failed (%s)", type(exc).__name__)
         return await _send(websocket, SpeechErrorMessage(
             chunk_id=result.chunk_id, code="speech_unavailable", message="Translated speech is unavailable",
         ))
+    finally:
+        metrics.observe("tts", (perf_counter() - began) * 1000)
     speech_send_began = perf_counter()
     sent = await _send(websocket, SpeechAudioMessage(
         chunk_id=result.chunk_id, audio_base64=base64.b64encode(audio).decode("ascii"),
@@ -352,8 +365,14 @@ async def translate_websocket(
 
     registry: ConnectionRegistry = websocket.app.state.websocket_connections
     if not await registry.acquire(user_id):
+        websocket.app.state.metrics.increment("connection_rejections")
         await _close(websocket, 1013)
         return
+
+    metrics = websocket.app.state.metrics
+    metrics.increment("ws_connections")
+    metrics.increment("ws_active")
+    ws_context_token = websocket_id_context.set(uuid4().hex)
 
     try:
         await websocket.accept()
@@ -449,6 +468,7 @@ async def translate_websocket(
                             service = await stack.enter_async_context(
                                 ai_service_context(settings, websocket.app.state.ai_provider_slots)
                             )
+                            service.metrics = metrics
                         except AIProviderUnavailable:
                             await _error(websocket, "provider_unavailable", "AI provider unavailable", False)
                             await _close(websocket, 1011)
@@ -521,11 +541,17 @@ async def translate_websocket(
                 pending_request_id = None
                 if not await _send(websocket, ProcessingMessage(chunk_id=chunk_id)):
                     return
-                if not await _process_chunk(
-                    websocket, db, token, user_id, service, start, audio, chunk_id, settings, request_id
-                ):
-                    return
+                chunk_context_token = chunk_id_context.set(chunk_id)
+                try:
+                    if not await _process_chunk(
+                        websocket, db, token, user_id, service, start, audio, chunk_id, settings, request_id
+                    ):
+                        return
+                finally:
+                    chunk_id_context.reset(chunk_context_token)
     except (WebSocketDisconnect, OSError, RuntimeError):
         return
     finally:
+        websocket_id_context.reset(ws_context_token)
+        metrics.increment("ws_active", -1)
         await registry.release(user_id)

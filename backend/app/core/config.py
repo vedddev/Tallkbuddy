@@ -3,9 +3,12 @@
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
 
 
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
@@ -25,6 +28,7 @@ class Settings(BaseSettings):
     app_env: Literal["development", "test", "production"] = "development"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     cors_origins: list[str] = Field(default_factory=list)
+    public_origin: str | None = None
     database_url: str | None = None
     database_pool_size: int = Field(default=5, ge=1, le=50)
     database_max_overflow: int = Field(default=5, ge=0, le=50)
@@ -70,6 +74,44 @@ class Settings(BaseSettings):
         if self.app_env == "development":
             origins.extend(LOCAL_DEVELOPMENT_ORIGINS)
         return list(dict.fromkeys(origins))
+
+    def validate_deployment(self) -> None:
+        """Fail before serving traffic when production secrets or origins are unsafe."""
+
+        if self.app_env != "production":
+            return
+        if not self.public_origin or not _valid_https_origin(self.public_origin):
+            raise RuntimeError("PUBLIC_ORIGIN must be one exact HTTPS origin in production")
+        if any(not _valid_https_origin(origin) for origin in self.cors_origins):
+            raise RuntimeError("CORS_ORIGINS must contain only exact HTTPS origins in production")
+        if any(origin != self.public_origin for origin in self.cors_origins):
+            raise RuntimeError("Production browser requests must use PUBLIC_ORIGIN for same-origin cookies and CSRF")
+        if self.auth_cookie_secure is False:
+            raise RuntimeError("AUTH_COOKIE_SECURE cannot be false in production")
+        try:
+            database = make_url(self.database_url or "")
+        except (ArgumentError, ValueError):
+            database = None
+        if database is None or database.drivername != "postgresql+asyncpg" or not database.database or not database.host or "replace-with" in (self.database_url or "").lower():
+            raise RuntimeError("DATABASE_URL must use a configured async PostgreSQL URL in production")
+        key = self.groq_api_key.get_secret_value() if self.groq_api_key else ""
+        if not key or key.startswith(("your_", "replace-with-")):
+            raise RuntimeError("GROQ_API_KEY must be configured in production")
+        azure_key = self.azure_speech_key.get_secret_value() if self.azure_speech_key else ""
+        if azure_key.startswith(("replace-with-", "your_")) or bool(azure_key) != bool(self.azure_speech_region):
+            raise RuntimeError("Azure Speech key and region must be configured together")
+
+
+def _valid_https_origin(value: str) -> bool:
+    try:
+        parsed = urlsplit(value)
+        _ = parsed.port
+    except ValueError:
+        return False
+    return bool(parsed.scheme == "https" and parsed.hostname and parsed.netloc and
+                not parsed.username and not parsed.password and not parsed.path and
+                not parsed.query and not parsed.fragment and "*" not in value and
+                parsed.hostname not in {"localhost", "127.0.0.1", "0.0.0.0"})
 
 
 @lru_cache

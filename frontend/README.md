@@ -30,6 +30,8 @@ npm.cmd run build
 
 `dist/` contains the production bundle. Serve it over HTTPS and reverse-proxy `/api` and `/ws` to FastAPI on the **same public origin**. Ensure your proxy forwards WebSocket upgrades and bounds upload and frame sizes. The backend session cookie is `Secure` in production. Never put Groq keys or database credentials in Vite variables; `VITE_` variables are public build-time values.
 
+For production, leave `VITE_API_BASE_URL` unset, set backend `PUBLIC_ORIGIN` to the exact HTTPS page origin, and route both `/api` and `/ws` through that host. A separate frontend hostname cannot read the current CSRF cookie. Run the [production smoke tests and release gates](../docs/PRODUCTION_READINESS.md) before launch; browser microphone, tab audio, and playback need real-device verification.
+
 The [shared language registry](../shared/languages.json) defines ten canonical codes with separate Whisper language hints and browser speech tags. All ten are accepted by FastAPI and appear in the meeting listener, workspace, and settings selectors. Existing language codes remain unchanged, and automatic source detection remains available. Chinese Mandarin uses `zh-CN` in TalkBuddy and `zh` when a source-language hint is sent to Whisper. Browser voice availability is device-specific; a language remains selectable for captions even if its voice is missing.
 
 ## Application routes

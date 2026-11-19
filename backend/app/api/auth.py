@@ -32,7 +32,8 @@ def require_trusted_origin(request: Request) -> None:
     """Reject browser writes that originate outside this API's allowed origins."""
 
     settings: Settings = request.app.state.settings
-    allowed = {_origin(str(request.base_url)), *settings.allowed_origins}
+    own_origin = settings.public_origin if settings.app_env == "production" else _origin(str(request.base_url))
+    allowed = {own_origin, *settings.allowed_origins}
     supplied = request.headers.get("origin") or request.headers.get("referer")
     if supplied and _origin(supplied) not in allowed:
         raise HTTPException(status_code=403, detail="Untrusted origin")
@@ -48,6 +49,7 @@ def _check_rate_limit(request: Request, action: str) -> None:
     limiter = request.app.state.auth_limiters[action]
     retry_after = limiter.retry_after(client_ip)
     if retry_after is not None:
+        request.app.state.metrics.increment("auth_rate_limited")
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many requests",
