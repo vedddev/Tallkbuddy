@@ -32,6 +32,8 @@ npm.cmd run build
 
 For production, leave `VITE_API_BASE_URL` unset, set backend `PUBLIC_ORIGIN` to the exact HTTPS page origin, and route both `/api` and `/ws` through that host. A separate frontend hostname cannot read the current CSRF cookie. Run the [production smoke tests and release gates](../docs/PRODUCTION_READINESS.md) before launch; browser microphone, tab audio, and playback need real-device verification.
 
+For a staging latency run, the Live Meeting diagnostics panel can download its last 30 numeric phrase timings as CSV. Reset before each language pair and record failed/dropped phrases separately. The export contains no audio or text. Follow the [Phase 14 real-device and evidence procedure](../docs/PHASE14_VALIDATION.md); mocked UI tests are separate from live browser verification.
+
 The [shared language registry](../shared/languages.json) defines ten canonical codes with separate Whisper language hints and browser speech tags. All ten are accepted by FastAPI and appear in the meeting listener, workspace, and settings selectors. Existing language codes remain unchanged, and automatic source detection remains available. Chinese Mandarin uses `zh-CN` in TalkBuddy and `zh` when a source-language hint is sent to Whisper. Browser voice availability is device-specific; a language remains selectable for captions even if its voice is missing.
 
 ## Application routes

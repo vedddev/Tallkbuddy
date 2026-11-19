@@ -1,5 +1,5 @@
-import { RotateCcw } from 'lucide-react'
-import { latencySummary, type PhraseTimingRecord } from '../lib/latency'
+import { Download, RotateCcw } from 'lucide-react'
+import { latencySummary, timingCsv, type PhraseTimingRecord } from '../lib/latency'
 
 function displayMs(value: number | null): string {
   if (value === null) return 'Unavailable'
@@ -20,6 +20,15 @@ export function LatencyDiagnostics({ records, connection, onReset, capture = 'Id
   queueDepth?: number
   playbackQueueDepth?: number
 }) {
+  const downloadTimings = () => {
+    if (!records.length) return
+    const url = URL.createObjectURL(new Blob([timingCsv(records)], { type: 'text/csv;charset=utf-8' }))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'talkbuddy-phrase-timings.csv'
+    link.click()
+    window.setTimeout(() => URL.revokeObjectURL(url), 0)
+  }
   const summary = latencySummary(records)
   const latest = records.at(-1)
   const metrics = [
@@ -43,7 +52,10 @@ export function LatencyDiagnostics({ records, connection, onReset, capture = 'Id
     <div className="border-t border-line px-4 pb-4 pt-3 sm:px-5">
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
         <span>Connection: {connection} · {records.length} recent phrase{records.length === 1 ? '' : 's'} · {summary.completeCount} with playback timing</span>
-        <button type="button" className="btn-secondary" onClick={onReset} disabled={!records.length}><RotateCcw size={14} aria-hidden="true" />Reset</button>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" className="btn-secondary" onClick={downloadTimings} disabled={!records.length}><Download size={14} aria-hidden="true" />Download timings</button>
+          <button type="button" className="btn-secondary" onClick={onReset} disabled={!records.length}><RotateCcw size={14} aria-hidden="true" />Reset</button>
+        </div>
       </div>
       <dl className="mt-3 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
         {[

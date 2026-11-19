@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { expect, it, vi } from 'vitest'
 import { LatencyDiagnostics } from '../components/LatencyDiagnostics'
-import { appendTiming, durationMs, latencySummary, percentile, timingRecord, type PhraseTimingRecord } from '../lib/latency'
+import { appendTiming, durationMs, latencySummary, percentile, timingCsv, timingRecord, type PhraseTimingRecord } from '../lib/latency'
 import type { SocketMessage } from '../lib/types'
 
 const result: Extract<SocketMessage, { type: 'result' }> = {
@@ -59,8 +59,24 @@ it('bounds in-memory records and renders an honest empty/reset state', () => {
   fireEvent.click(screen.getByText(/Diagnostics/))
   expect(screen.getByText(/No phrase timings yet/)).toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Reset' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Download timings' })).toBeDisabled()
   view.rerender(<LatencyDiagnostics records={records} connection="Listening" onReset={reset} />)
   expect(screen.getByText(/30 recent phrases/)).toBeInTheDocument()
   fireEvent.click(screen.getByRole('button', { name: 'Reset' }))
   expect(reset).toHaveBeenCalledOnce()
+})
+
+it('exports only finite numeric timings, never phrase text or identifiers', () => {
+  const record = timingRecord(1, result, {
+    capture: { speechEndAtMs: 100, captureDurationMs: 1200, phraseId: 'private-phrase' },
+    submittedAtMs: 820, receivedAtMs: 1700,
+  })
+  const csv = timingCsv([{ ...record, totalMs: 1800, ttsMs: Number.NaN }])
+  expect(csv).toContain('serverChunkId,captureDurationMs')
+  expect(csv).toContain('1,1200,')
+  expect(csv).toContain('1800')
+  expect(csv).not.toContain('Hello')
+  expect(csv).not.toContain('Bonjour')
+  expect(csv).not.toContain('private-phrase')
+  expect(csv).not.toContain('NaN')
 })

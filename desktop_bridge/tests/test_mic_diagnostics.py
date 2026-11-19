@@ -1,4 +1,5 @@
 from io import BytesIO
+from threading import Event
 import wave
 
 import numpy as np
@@ -88,7 +89,15 @@ def test_host_api_open_error_is_reported_without_device_fallback() -> None:
 def test_capture_uses_native_stereo_then_downmixes_to_16khz_mono_wav() -> None:
     backend = StereoOnlyBackend()
     phrases = []
-    summary = capture_microphone(MIC, phrases.append, duration=0.05, backend=backend, report=lambda _: None)
+    completed = Event()
+
+    def on_phrase(phrase):
+        phrases.append(phrase)
+        completed.set()
+
+    # Stop on the synthetic phrase, with a bounded timeout if capture regresses.
+    summary = capture_microphone(MIC, on_phrase, duration=2, stop_event=completed,
+                                 backend=backend, report=lambda _: None)
     assert summary.phrases == 1
     assert backend.streams[-1].kwargs["samplerate"] == 44100
     assert backend.streams[-1].kwargs["channels"] == 2

@@ -41,6 +41,20 @@ export interface PhraseTimingRecord {
 
 export const MAX_TIMING_RECORDS = 30
 
+const exportFields = [
+  'serverChunkId', 'captureDurationMs', 'encodingMs', 'speechEndToSubmitMs',
+  'roundTripMs', 'captionMs', 'serverProcessingMs', 'sttMs', 'translationMs',
+  'ttsMs', 'browserPreparationMs', 'queueWaitMs', 'playbackStartDelayMs', 'totalMs',
+] as const
+
+/** Numeric-only local export; no speech, audio, identity, or session data. */
+export function timingCsv(records: PhraseTimingRecord[]): string {
+  return [exportFields.join(','), ...records.map((record) => exportFields.map((field) => {
+    const value = record[field]
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? String(value) : ''
+  }).join(','))].join('\n') + '\n'
+}
+
 export function durationMs(start: number | null | undefined, end: number | null | undefined): number | null {
   if (start == null || end == null || !Number.isFinite(start) || !Number.isFinite(end) || end < start) return null
   return end - start

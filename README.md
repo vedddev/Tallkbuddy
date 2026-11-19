@@ -14,6 +14,10 @@ In development, the API can start and `/api/health` works without PostgreSQL. `/
 
 For deployment, migration, backup, monitoring, smoke testing, and release gates, use the [Phase 13 production readiness guide](docs/PRODUCTION_READINESS.md). The GitHub Actions workflow runs tests and build checks; it does not deploy. A passing automated suite does not verify real microphone or meeting audio.
 
+The [Phase 14 staging validation record](docs/PHASE14_VALIDATION.md) contains the same-origin staging checklist, opt-in HTTP/WSS smoke command, real-browser/audio test procedure, latency evidence protocol, and evidence-based release decision. No staging deployment or real-device test has been performed here.
+
+The [Phase 14.1 local verification report](docs/PHASE14_1_LOCAL_VERIFICATION.md) records development PostgreSQL, authentication, Vite proxy, WebSocket, and live Groq **text** checks separately from unverified physical-browser audio. Its opt-in local smoke script creates and removes its own test account.
+
 ## Install and run
 
 From the repository root, in PowerShell:
