@@ -1,14 +1,18 @@
 """Manual Groq smoke script. Importing this module must never call Groq."""
 
+import argparse
 import os
 
 from dotenv import load_dotenv
 from groq import Groq
 
 
-def main() -> int:
+def main(*, live: bool = False) -> int:
     """Run one explicitly requested live translation; no CI test imports may bill."""
 
+    if not live:
+        print("REFUSED: pass --live to allow one billable Groq request")
+        return 2
     load_dotenv()
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
@@ -36,4 +40,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--live", action="store_true", help="Allow one billable Groq translation request")
+    args = parser.parse_args()
+    raise SystemExit(main(live=args.live))

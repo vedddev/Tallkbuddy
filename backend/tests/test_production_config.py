@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings
+from app.db.session import get_db_session
 from app.main import create_app
 from app.ws.translate import _origin_allowed
 
@@ -66,6 +67,12 @@ def test_production_websocket_origin_uses_public_origin_instead_of_host() -> Non
 
 def test_production_http_origin_and_cors_reject_forged_host() -> None:
     application = create_app(settings())
+
+    async def unused_database_session():
+        # This test checks origin and request validation, not database access.
+        yield object()
+
+    application.dependency_overrides[get_db_session] = unused_database_session
     with TestClient(application) as client:
         forged = client.post(
             "/api/auth/register", json={},
