@@ -1,34 +1,39 @@
+"""Manual Groq smoke script. Importing this module must never call Groq."""
+
 import os
+
 from dotenv import load_dotenv
 from groq import Groq
 
-load_dotenv()
 
-api_key = os.getenv("GROQ_API_KEY")
+def main() -> int:
+    """Run one explicitly requested live translation; no CI test imports may bill."""
 
-if not api_key:
-    print("ERROR: GROQ_API_KEY not found in .env")
-    raise SystemExit(1)
+    load_dotenv()
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        print("ERROR: GROQ_API_KEY is not configured")
+        return 1
 
-client = Groq(api_key=api_key)
+    try:
+        with Groq(api_key=api_key) as client:
+            response = client.chat.completions.create(
+                model=os.getenv("GROQ_TRANSLATION_MODEL", "openai/gpt-oss-20b"),
+                messages=[
+                    {"role": "user", "content": "Translate Hello into Hindi. Return only the translation."}
+                ],
+                max_completion_tokens=100,
+            )
+        print("SUCCESS: Groq API is working!")
+        print("Response:", response.choices[0].message.content)
+        return 0
+    except Exception as exc:
+        print("FAILED")
+        print("Error type:", type(exc).__name__)
+        print("HTTP status:", getattr(exc, "status_code", "N/A"))
+        print("Check the provider error details locally.")
+        return 1
 
-try:
-    response = client.chat.completions.create(
-        model=os.getenv("GROQ_TRANSLATION_MODEL", "openai/gpt-oss-20b"),
-        messages=[
-            {
-                "role": "user",
-                "content": "Translate Hello into Hindi. Return only the translation."
-            }
-        ],
-        max_completion_tokens=100,
-    )
 
-    print("SUCCESS: Groq API is working!")
-    print("Response:", response.choices[0].message.content)
-
-except Exception as e:
-    print("FAILED")
-    print("Error type:", type(e).__name__)
-    print("HTTP status:", getattr(e, "status_code", "N/A"))
-    print("Check the provider error details locally.")
+if __name__ == "__main__":
+    raise SystemExit(main())
