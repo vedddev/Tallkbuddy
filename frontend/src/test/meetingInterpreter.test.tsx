@@ -173,6 +173,11 @@ it('keeps translated captions visible when the selected browser voice is missing
   expect(screen.getByText('Translation unavailable for this phrase.')).toBeInTheDocument()
   expect(screen.getByRole('status', { name: 'Error' })).toBeInTheDocument()
   expect(screen.getByText(longTranslation)).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Download TXT' })).toBeEnabled()
+  expect(screen.getByText('4 phrases')).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: 'Clear captions' }))
+  expect(screen.getByRole('button', { name: 'Download TXT' })).toBeDisabled()
+  expect(screen.getByText('0 phrases')).toBeInTheDocument()
 })
 
 it('shares a tab first, then starts, pauses, resumes, and stops without duplicate starts', async () => {

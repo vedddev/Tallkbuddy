@@ -1,8 +1,9 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { AudioLines, Captions, Headphones, Mic2, Pause, Play, Radio, Square, Volume2, VolumeX } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { LanguageSelect } from './LanguageSelect'
 import { LatencyDiagnostics } from './LatencyDiagnostics'
+import { TranscriptExportControls } from './TranscriptExportControls'
 import { Button, Card, ErrorMessage, StatusIndicator } from './ui/Primitives'
 import { api } from '../lib/api'
 import { languageByCode } from '../lib/languageRegistry'
@@ -12,11 +13,12 @@ import { startMeetingCapture, startMicrophoneCapture, type MeetingCapture } from
 import { AutoSpeechQueue, type SpeechProvider } from '../lib/autoSpeechQueue'
 import type { PlaybackStatus } from '../lib/speechQueue'
 import { TranslationSocket } from '../lib/socket'
+import { MAX_TRANSCRIPT_ENTRIES, transcriptTiming, type TranscriptEntry, type TranscriptSession } from '../lib/transcriptExport'
 import { voiceForLanguage } from '../lib/voices'
 import type { Language, Preferences, SocketMessage, SourceLanguage } from '../lib/types'
 
 type Result = Extract<SocketMessage, { type: 'result' }>
-type TimedResult = Result & { receivedAt: number; displayId: number; translationFailed?: boolean }
+type TimedResult = Result & { receivedAt: number; displayId: number; exportEntry: TranscriptEntry; translationFailed?: boolean }
 type Status = 'idle' | 'permission' | 'shared' | 'connecting' | 'listening' | 'paused' | 'reconnecting' | 'stopping' | 'disconnected' | 'error'
 
 interface Props {
@@ -94,6 +96,11 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [results, setResults] = useState<TimedResult[]>([])
+  const exportEntries = useMemo(() => results.map((item) => item.exportEntry), [results])
+  const [exportSession, setExportSession] = useState<TranscriptSession | null>(null)
+  const [exportTruncated, setExportTruncated] = useState(0)
+  const exportSessionRef = useRef<TranscriptSession | null>(null)
+  const exportCountRef = useRef(0)
   const [timings, setTimings] = useState<PhraseTimingRecord[]>([])
   const [phraseCount, setPhraseCount] = useState(0)
   const [capturedPhrases, setCapturedPhrases] = useState(0)
@@ -198,7 +205,18 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
           setProcessing(false)
           if (seenResultsRef.current.has(message.chunk_id)) return
           seenResultsRef.current.add(message.chunk_id)
-          setResults((items) => [...items, { ...message, receivedAt: Date.now(), displayId: ++displaySequenceRef.current }].slice(-30))
+          const displayId = ++displaySequenceRef.current
+          const session = exportSessionRef.current
+          if (session) {
+            const exportEntry: TranscriptEntry = {
+              sessionId: session.id, order: displayId, original: message.original,
+              translated: message.translated, sourceLanguage: message.detected_language || null,
+              targetLanguage: message.target_language, ...transcriptTiming(timing?.capture),
+            }
+            exportCountRef.current += 1
+            setExportTruncated(Math.max(0, exportCountRef.current - MAX_TRANSCRIPT_ENTRIES))
+            setResults((items) => [...items, { ...message, receivedAt: Date.now(), displayId, exportEntry }].slice(-MAX_TRANSCRIPT_ENTRIES))
+          }
           setError('')
           const playbackSequence = ++playbackSequenceRef.current
           audioIdsRef.current.set(message.chunk_id, playbackSequence)
@@ -220,14 +238,23 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
           setError(socketErrorMessage(message))
           if (message.original && message.chunk_id && !seenResultsRef.current.has(message.chunk_id)) {
             seenResultsRef.current.add(message.chunk_id)
+            const displayId = ++displaySequenceRef.current
+            const session = exportSessionRef.current
+            if (session) {
             const failedResult: TimedResult = {
               type: 'result', chunk_id: message.chunk_id, original: message.original, translated: '',
               detected_language: message.detected_language ?? null,
               language_detection_source: message.language_detection_source,
               target_language: target, processing_time_ms: 0,
-              receivedAt: Date.now(), displayId: ++displaySequenceRef.current, translationFailed: true,
+              receivedAt: Date.now(), displayId, translationFailed: true,
+              exportEntry: { sessionId: session.id, order: displayId, original: message.original,
+                translated: null, sourceLanguage: message.detected_language || null,
+                targetLanguage: target, ...transcriptTiming(timing?.capture) },
             }
-            setResults((items) => [...items, failedResult].slice(-30))
+            exportCountRef.current += 1
+            setExportTruncated(Math.max(0, exportCountRef.current - MAX_TRANSCRIPT_ENTRIES))
+            setResults((items) => [...items, failedResult].slice(-MAX_TRANSCRIPT_ENTRIES))
+            }
           }
           if (!message.recoverable) { terminalErrorRef.current = true; captureRef.current?.pause(); setActivity(0) }
         }
@@ -344,6 +371,11 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
     seenResultsRef.current.clear()
     playbackSequenceRef.current = 0
     displaySequenceRef.current = 0
+    exportCountRef.current = 0
+    setExportTruncated(0)
+    const localSession: TranscriptSession = { id: crypto.randomUUID(), startedAt: new Date().toISOString(), sourceLanguage: source, targetLanguage: target }
+    exportSessionRef.current = localSession
+    setExportSession(localSession)
     try {
       // Capture is requested directly from the click when the tab has not already been shared.
       const capture = captureRef.current || await prepareCapture(generation)
@@ -353,6 +385,8 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
         const session = await api.createSession(source, target)
         if (generation !== generationRef.current) { await api.endSession(session.id).catch(() => undefined); return }
         sessionIdRef.current = session.id
+        exportSessionRef.current = { ...localSession, id: session.id }
+        setExportSession(exportSessionRef.current)
       }
       speechRef.current = new AutoSpeechQueue(
         window.speechSynthesis || null,
@@ -422,7 +456,7 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
       {interpreting && <p className="mt-2 text-xs text-muted">Stop the session to change languages.</p>}
       {!voiceAvailable && <p className="mt-2 text-xs text-[var(--color-warning)]">A compatible browser voice is unavailable. If Azure is also unavailable, translated captions will continue without speech.</p>}
       <div className="mt-5 grid gap-3 sm:grid-cols-2">{mode === 'meeting' && <label className="flex items-start gap-2 rounded-md border border-line p-3 text-sm"><input type="checkbox" checked={muteOriginal} disabled={Boolean(captureRef.current && !captureRef.current.originalMuteSupported)} onChange={(event) => void toggleOriginalMute(event.target.checked)} className="mt-0.5 accent-accent" /><span><span className="block font-medium">Mute original tab audio</span><span className="block text-xs leading-5 text-muted">Available only when your browser supports it.</span></span></label>}<label className="flex items-start gap-2 rounded-md border border-line p-3 text-sm"><input type="checkbox" checked={saveHistory} disabled={interpreting || !preferences?.save_history_enabled} onChange={(event) => setSaveHistory(event.target.checked)} className="mt-0.5 accent-accent" /><span><span className="block font-medium">Save translated text</span><span className="block text-xs leading-5 text-muted">Off by default. {preferences?.save_history_enabled ? 'Opt in for this session.' : <>Enable in <Link className="text-accent underline" to="/settings">Settings</Link> first.</>}</span></span></label><label className="flex items-start gap-2 rounded-md border border-line p-3 text-sm"><input type="checkbox" checked={muteTranslated} onChange={(event) => { setMuteTranslated(event.target.checked); if (event.target.checked) speechRef.current?.mute(); else if (status === 'listening') speechRef.current?.resume() }} className="mt-0.5 accent-accent" /><span><span className="block font-medium">Mute translated speech</span><span className="block text-xs leading-5 text-muted">Captions continue; queued speech stops.</span></span></label></div>
-      <div className="mt-5 flex flex-wrap gap-2">{mode === 'meeting' && <Button type="button" onClick={() => void shareTab()} disabled={sessionActive || microphoneActive} className="w-full sm:w-auto"><Radio size={16} />Share browser tab with audio</Button>}<Button type="button" variant="primary" onClick={() => void start()} disabled={!['idle', 'error', 'disconnected', 'shared'].includes(status) || (mode === 'meeting' && microphoneActive)} className="w-full sm:w-auto"><Headphones size={16} />Start interpretation</Button><Button type="button" onClick={togglePause} disabled={status !== 'listening' && status !== 'paused'} className="flex-1 sm:flex-none">{status === 'paused' ? <Play size={16} /> : <Pause size={16} />}{status === 'paused' ? 'Resume' : 'Pause'}</Button><Button type="button" onClick={() => void stop()} disabled={!sessionActive || status === 'stopping'} className="flex-1 sm:flex-none"><Square size={15} />Stop session</Button><Button type="button" onClick={() => { setResults([]); setTimings([]) }} disabled={!results.length} className="w-full sm:w-auto">Clear captions</Button></div>
+      <div className="mt-5 flex flex-wrap gap-2">{mode === 'meeting' && <Button type="button" onClick={() => void shareTab()} disabled={sessionActive || microphoneActive} className="w-full sm:w-auto"><Radio size={16} />Share browser tab with audio</Button>}<Button type="button" variant="primary" onClick={() => void start()} disabled={!['idle', 'error', 'disconnected', 'shared'].includes(status) || (mode === 'meeting' && microphoneActive)} className="w-full sm:w-auto"><Headphones size={16} />Start interpretation</Button><Button type="button" onClick={togglePause} disabled={status !== 'listening' && status !== 'paused'} className="flex-1 sm:flex-none">{status === 'paused' ? <Play size={16} /> : <Pause size={16} />}{status === 'paused' ? 'Resume' : 'Pause'}</Button><Button type="button" onClick={() => void stop()} disabled={!sessionActive || status === 'stopping'} className="flex-1 sm:flex-none"><Square size={15} />Stop session</Button><Button type="button" onClick={() => { setResults([]); setTimings([]); exportCountRef.current = 0; setExportTruncated(0) }} disabled={!results.length} className="w-full sm:w-auto">Clear captions</Button></div>
       <p className="mt-3 text-xs leading-5 text-muted">{mode === 'meeting' ? 'Choose a browser tab and enable “Share tab audio” in the permission prompt. TalkBuddy cannot capture another tab without your approval.' : 'Choose a microphone above, then press Start to request permission. Use headphones to reduce feedback.'} Audio is processed but not saved by default.</p>
       <div className="mt-4 flex flex-wrap items-center gap-4 border-t border-line pt-4 text-xs text-muted"><span className="flex items-center gap-2"><AudioLines size={15} />Audio activity</span><div role="meter" aria-label="Captured audio activity" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(activity * 100)} className="h-1.5 w-32 overflow-hidden rounded-full bg-raised"><div className="h-full rounded-full bg-accent transition-[width] duration-150" style={{ width: `${Math.round(activity * 100)}%` }} /></div><span>{activity > 0 && status === 'listening' ? 'Audio detected' : status === 'paused' ? 'Paused' : 'Waiting for audio'}</span><span className="flex items-center gap-1.5 sm:ml-auto">{playback === 'playing' ? <Volume2 size={15} /> : <VolumeX size={15} />}{muteTranslated ? 'Translated speech muted' : playback === 'playing' ? `Playing ${speechProvider} speech${queuedSpeech ? ` · ${queuedSpeech} queued` : ''}` : playback === 'paused' ? 'Playback paused' : voiceAvailable ? 'Playback idle' : 'Captions only if Azure is unavailable'}</span></div>
     </Card>
@@ -430,6 +464,7 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
     <LatencyDiagnostics records={timings} connection={websocketStatus} capture={statusLabel} inputLevel={activity} capturedPhrases={capturedPhrases} phraseCount={phraseCount} processing={processing} processingErrors={processingErrors} droppedPhrases={droppedPhrases} droppedSamples={droppedSamples} bufferOverflows={bufferOverflows} websocketDisconnects={websocketDisconnects} playbackFailures={playbackFailures} queueDepth={queueDepth} playbackQueueDepth={queuedSpeech} onReset={() => { setTimings([]); setCapturedPhrases(0); setPhraseCount(0); setProcessingErrors(0); setDroppedPhrases(0); setDroppedSamples(0); setBufferOverflows(0); setWebsocketDisconnects(0); setPlaybackFailures(0) }} />
     {notice && <p role="status" className="rounded-lg border border-[var(--color-warning)] bg-[var(--color-warning-surface)] px-4 py-3 text-sm text-[var(--color-warning)]">{notice}</p>}
     {error && <ErrorMessage message={error} />}
-    <div className="grid min-w-0 gap-4 md:grid-cols-2"><PhrasePanel title="Original speech" icon={<Captions size={17} className="text-muted" />} results={results} field="original" empty="Completed spoken phrases will appear here after transcription." pending={processing} /><PhrasePanel title="Translated speech" icon={<Volume2 size={17} className="text-accent" />} results={results} field="translated" empty="Translated captions will appear here. Playback requires a compatible browser voice." pending={processing} language={targetName} /></div>
+    <div className="grid min-w-0 gap-4 md:grid-cols-2"><PhrasePanel title="Original speech" icon={<Captions size={17} className="text-muted" />} results={results.slice(-30)} field="original" empty="Completed spoken phrases will appear here after transcription." pending={processing} /><PhrasePanel title="Translated speech" icon={<Volume2 size={17} className="text-accent" />} results={results.slice(-30)} field="translated" empty="Translated captions will appear here. Playback requires a compatible browser voice." pending={processing} language={targetName} /></div>
+    {mode === 'meeting' && <TranscriptExportControls session={exportSession} entries={exportEntries} truncated={exportTruncated} />}
   </section>
 }

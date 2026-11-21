@@ -87,7 +87,7 @@ export class TranslationSocket {
           if (!settled) { settled = true; window.clearTimeout(timeout); resolve() }
         }
         let timing: SocketRoundTripTiming | undefined
-        if (message.type === 'result' && this.inFlightTiming) {
+        if ((message.type === 'result' || (message.type === 'error' && Boolean(message.original))) && this.inFlightTiming) {
           timing = { ...this.inFlightTiming, receivedAtMs }
         }
         if ((message.type === 'result' && !this.config?.synthesize_speech) || message.type === 'error' || message.type === 'speech_audio' || message.type === 'speech_error') {
