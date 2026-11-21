@@ -141,12 +141,13 @@ def test_valid_audio_processing(ws_harness: AuthHarness) -> None:
         assert result["original"] == "Hello"
         assert result["translated"] == "Bonjour"
         assert result["detected_language"] == "en"
+        assert result["language_detection_source"] == "stt"
         assert result["target_language"] == "fr"
         assert result["processing_time_ms"] >= 0
         assert 0 <= result["transcription_time_ms"] <= result["processing_time_ms"]
         assert 0 <= result["translation_time_ms"] <= result["processing_time_ms"]
     ws_harness.ws_service.transcribe.assert_awaited_once_with(data, "audio.wav")
-    ws_harness.ws_service.translate.assert_awaited_once_with("Hello", "fr")
+    ws_harness.ws_service.translate.assert_awaited_once_with("Hello", "fr", source_language="en")
 
 
 def test_pipeline_debug_timings_do_not_log_speech(ws_harness: AuthHarness, caplog: pytest.LogCaptureFixture) -> None:
@@ -168,6 +169,8 @@ def test_pipeline_debug_timings_do_not_log_speech(ws_harness: AuthHarness, caplo
 def test_opt_in_speech_audio_preserves_browser_result_contract(ws_harness: AuthHarness, monkeypatch: pytest.MonkeyPatch) -> None:
     ws_harness.client.app.state.settings.azure_speech_key = SecretStr("test-only")
     ws_harness.client.app.state.settings.azure_speech_region = "eastus"
+    ws_harness.client.app.state.settings.azure_speech_endpoint = "https://test-resource.cognitiveservices.azure.com"
+    ws_harness.client.app.state.settings.azure_tts_enabled = True
     async def fake_speech(text, language, _settings):
         assert (text, language) == ("Bonjour", "fr")
         return wav_chunk()
@@ -192,6 +195,8 @@ def test_opt_in_speech_failure_has_no_audio(ws_harness: AuthHarness, monkeypatch
     from app.ai.tts import TTSError
     ws_harness.client.app.state.settings.azure_speech_key = SecretStr("test-only")
     ws_harness.client.app.state.settings.azure_speech_region = "eastus"
+    ws_harness.client.app.state.settings.azure_speech_endpoint = "https://test-resource.cognitiveservices.azure.com"
+    ws_harness.client.app.state.settings.azure_tts_enabled = True
 
     async def unavailable(*_args):
         raise TTSError("provider details")
@@ -224,7 +229,7 @@ def test_websocket_reports_separate_mocked_stage_and_client_latency(ws_harness: 
         await asyncio.sleep(0.02)
         return TranscriptionResponse(text="Hello", detected_language="en")
 
-    async def translate_with_delay(*_args):
+    async def translate_with_delay(*_args, **_kwargs):
         await asyncio.sleep(0.02)
         return TranslationResponse(original_text="Hello", translated_text="Bonjour", target_language="fr")
 
@@ -254,6 +259,7 @@ def test_optional_source_language_passed_to_transcription(ws_harness: AuthHarnes
         assert socket.receive_json()["type"] == "processing"
         assert socket.receive_json()["type"] == "result"
     ws_harness.ws_service.transcribe.assert_awaited_once_with(data, "audio.wav", "hi")
+    ws_harness.ws_service.translate.assert_awaited_once_with("Hello", "fr", source_language="hi")
 
 
 def test_invalid_audio_then_valid_audio(ws_harness: AuthHarness) -> None:
@@ -362,6 +368,72 @@ def test_translation_failure_is_recoverable(ws_harness: AuthHarness) -> None:
         assert error["code"] == "provider_error"
         assert error["message"] == "AI processing failed"
         assert error["recoverable"] is True
+        assert error["original"] == "Hello"
+        assert error["detected_language"] == "en"
+        assert error["language_detection_source"] == "stt"
+        assert error["chunk_id"] == 1
+
+
+@pytest.mark.parametrize("language,text,target", [
+    ("en", "Hello", "hi"), ("hi", "नमस्ते", "en"), ("mr", "नमस्कार", "en"),
+])
+def test_auto_detect_uses_stt_metadata_per_phrase(ws_harness: AuthHarness, language, text, target) -> None:
+    ws_harness.ws_service.transcribe.return_value = TranscriptionResponse(text=text, detected_language=language)
+    with ws_harness.client.websocket_connect("/ws/translate", headers=ORIGIN) as socket:
+        socket.send_json({**START, "target_language": target})
+        socket.receive_json()
+        socket.send_bytes(wav_chunk())
+        assert socket.receive_json()["type"] == "processing"
+        result = socket.receive_json()
+        assert result["original"] == text
+        assert result["detected_language"] == language
+        assert result["language_detection_source"] == "stt"
+    ws_harness.ws_service.transcribe.assert_awaited_once_with(wav_chunk(), "audio.wav")
+    ws_harness.ws_service.translate.assert_awaited_once_with(text, target, source_language=language)
+
+
+def test_auto_detect_can_change_between_consecutive_phrases(ws_harness: AuthHarness) -> None:
+    ws_harness.ws_service.transcribe.side_effect = [
+        TranscriptionResponse(text="Hello", detected_language="en"),
+        TranscriptionResponse(text="नमस्कार", detected_language="mr"),
+    ]
+    with ws_harness.client.websocket_connect("/ws/translate", headers=ORIGIN) as socket:
+        socket.send_json({**START, "target_language": "hi"})
+        socket.receive_json()
+        for expected in ("en", "mr"):
+            socket.send_bytes(wav_chunk())
+            assert socket.receive_json()["type"] == "processing"
+            result = socket.receive_json()
+            assert result["detected_language"] == expected
+    assert ws_harness.ws_service.translate.await_args_list[0].kwargs["source_language"] == "en"
+    assert ws_harness.ws_service.translate.await_args_list[1].kwargs["source_language"] == "mr"
+
+
+@pytest.mark.parametrize("raw", [None, "xx"])
+def test_missing_or_unsupported_detection_stays_unknown(ws_harness: AuthHarness, raw) -> None:
+    ws_harness.ws_service.transcribe.return_value = TranscriptionResponse(text="Hello", detected_language=raw)
+    with ws_harness.client.websocket_connect("/ws/translate", headers=ORIGIN) as socket:
+        socket.send_json(START)
+        socket.receive_json()
+        socket.send_bytes(wav_chunk())
+        socket.receive_json()
+        result = socket.receive_json()
+        assert result["detected_language"] is None
+        assert result["language_detection_source"] == "unknown"
+    ws_harness.ws_service.translate.assert_awaited_once_with("Hello", "fr", source_language=None)
+
+
+def test_same_language_detection_skips_llm_and_preserves_phrase(ws_harness: AuthHarness) -> None:
+    ws_harness.ws_service.transcribe.return_value = TranscriptionResponse(text="नमस्ते", detected_language="hi")
+    with ws_harness.client.websocket_connect("/ws/translate", headers=ORIGIN) as socket:
+        socket.send_json({**START, "target_language": "hi"})
+        socket.receive_json()
+        socket.send_bytes(wav_chunk())
+        socket.receive_json()
+        result = socket.receive_json()
+        assert result["original"] == result["translated"] == "नमस्ते"
+        assert result["translation_time_ms"] == 0
+    ws_harness.ws_service.translate.assert_not_awaited()
 
 
 def test_processing_timeout_is_recoverable(ws_harness: AuthHarness) -> None:

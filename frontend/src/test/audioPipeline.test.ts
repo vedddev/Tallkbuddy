@@ -5,8 +5,8 @@ import { DEFAULT_VAD_OPTIONS, PhraseSegmenter } from '../lib/meetingAudio'
 it('batches stereo audio in the worklet and bounds delivery until acknowledgement', () => {
   let Processor: new () => { port: { onmessage: ((event: { data: string }) => void) | null; postMessage: ReturnType<typeof vi.fn> }; process: (inputs: Float32Array[][]) => boolean }
   class FakeBase { port = { onmessage: null as ((event: { data: string }) => void) | null, postMessage: vi.fn() } }
-  new Function('AudioWorkletProcessor', 'registerProcessor', 'sampleRate', captureWorkletCode)(
-    FakeBase, (_name: string, value: typeof Processor) => { Processor = value }, 48_000,
+  new Function('AudioWorkletProcessor', 'registerProcessor', 'sampleRate', 'currentTime', captureWorkletCode)(
+    FakeBase, (_name: string, value: typeof Processor) => { Processor = value }, 48_000, 0,
   )
   const processor = new Processor!()
   const stereo = [new Float32Array(128).fill(0.8), new Float32Array(128).fill(-0.4)]
@@ -20,7 +20,11 @@ it('batches stereo audio in the worklet and bounds delivery until acknowledgemen
   processor.port.onmessage?.({ data: 'ack' })
   for (let i = 0; i < 8; i++) processor.process([stereo])
   const second = unpackAudioBlock(processor.port.postMessage.mock.calls[1][0])!
-  expect(second.droppedSamples).toBeGreaterThan(0)
+  expect(second.droppedSamples).toBe(0)
+  for (let i = 0; i < 80; i++) processor.process([stereo])
+  processor.port.onmessage?.({ data: 'ack' })
+  const afterOverflow = unpackAudioBlock(processor.port.postMessage.mock.calls[2][0])!
+  expect(afterOverflow.droppedSamples).toBeGreaterThan(0)
 })
 
 it('resamples common browser rates into bounded mono 16 kHz PCM without amplification', () => {

@@ -47,3 +47,25 @@ def test_transcription_sends_mandarin_hint_and_normalizes_detection() -> None:
     result = asyncio.run(service.transcribe(b"RIFFdata", "sample.wav", "zh-CN"))
     assert create.await_args.kwargs["language"] == "zh"
     assert result.detected_language == "zh-CN"
+
+
+@pytest.mark.parametrize("provider_label,expected", [
+    ("English", "en"), ("Hindi", "hi"), ("Marathi", "mr"),
+    ("hi-IN", "hi"), ("Italian", "it"), ("it", "it"),
+    ("Unrecognized Provider Label", None), (None, None),
+])
+def test_auto_detection_uses_provider_metadata_without_language_hint(provider_label, expected) -> None:
+    create = AsyncMock(return_value=SimpleNamespace(text="spoken words", language=provider_label))
+    client = SimpleNamespace(audio=SimpleNamespace(transcriptions=SimpleNamespace(create=create)))
+    result = asyncio.run(AIService(client, Settings(_env_file=None)).transcribe(b"RIFFdata", "sample.wav"))
+    assert "language" not in create.await_args.kwargs
+    assert create.await_args.kwargs["response_format"] == "verbose_json"
+    assert result.detected_language == expected
+
+
+def test_manual_source_hint_is_preserved_when_provider_reports_another_language() -> None:
+    create = AsyncMock(return_value=SimpleNamespace(text="नमस्कार", language="Hindi"))
+    client = SimpleNamespace(audio=SimpleNamespace(transcriptions=SimpleNamespace(create=create)))
+    result = asyncio.run(AIService(client, Settings(_env_file=None)).transcribe(b"RIFFdata", "sample.wav", "mr"))
+    assert create.await_args.kwargs["language"] == "mr"
+    assert result.detected_language == "hi"

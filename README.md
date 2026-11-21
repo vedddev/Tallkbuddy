@@ -173,6 +173,8 @@ The frontend offers a [microphone translator](frontend/README.md#browser-audio-m
 
 The browser audio path batches capture blocks in AudioWorklet, bounds phrase and WebSocket queues, and cancels local capture/playback promptly on Stop. Expand **Diagnostics** on either audio route for separate caption and playback latency, server STT/translation time, queue depths, and dropped audio. See the [audio architecture](frontend/README.md#browser-audio-modes) and [Windows 11 manual test checklist](frontend/README.md#windows-11-and-chromium-manual-audio-checklist). No real-device latency target or calling-app playback is claimed from automated tests.
 
+The [Phase 15 reliability report](docs/PHASE15_REPORT.md) records the bounded worklet buffer, accurate drop and playback status reporting, CI hang diagnostics, and a real-browser YouTube tab-audio checklist. The GitHub Linux hang remains unconfirmed until the next verbose CI run identifies its test.
+
 ## Tests
 
 From `backend/` with the virtual environment active:

@@ -1,6 +1,7 @@
 """Canonical language codes and provider hints from the shared registry."""
 
 import json
+import re
 from pathlib import Path
 
 
@@ -22,6 +23,16 @@ LANGUAGE_CODES: dict[str, str] = {
     "chinese mandarin": "zh-CN",
 }
 
+# Whisper may return a language name or an ISO code. These additional names
+# remain valid source metadata, even though they are not target UI options.
+OTHER_PROVIDER_LANGUAGES = {
+    "italian": "it", "portuguese": "pt", "arabic": "ar", "bengali": "bn",
+    "tamil": "ta", "telugu": "te", "urdu": "ur", "dutch": "nl",
+    "turkish": "tr", "polish": "pl", "ukrainian": "uk", "indonesian": "id",
+    "vietnamese": "vi", "thai": "th", "swedish": "sv", "punjabi": "pa",
+    "gujarati": "gu", "kannada": "kn", "malayalam": "ml",
+}
+
 
 def parse_target_language(value: str) -> str:
     """Accept a supported language name or code, returning its canonical code."""
@@ -39,9 +50,16 @@ def whisper_language_code(value: str) -> str:
 
 
 def normalize_detected_language(value: str | None) -> str | None:
-    """Normalize known provider labels; preserve unknown labels for compatibility."""
+    """Normalize provider metadata; return None for unrecognized labels."""
 
     if not value or not value.strip():
         return None
     normalized = value.strip().casefold()
-    return LANGUAGE_CODES.get(normalized, normalized)
+    if normalized in LANGUAGE_CODES:
+        return LANGUAGE_CODES[normalized]
+    if normalized in OTHER_PROVIDER_LANGUAGES:
+        return OTHER_PROVIDER_LANGUAGES[normalized]
+    if re.fullmatch(r"[a-z]{2}(?:-[a-z]{2})?", normalized):
+        base = normalized.split("-", 1)[0]
+        return LANGUAGE_CODES.get(base) or (base if base in OTHER_PROVIDER_LANGUAGES.values() else None)
+    return None

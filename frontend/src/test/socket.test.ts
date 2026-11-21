@@ -7,6 +7,7 @@ class FakeWebSocket {
   static OPEN = 1
   static instance: FakeWebSocket
   readyState = 0
+  bufferedAmount = 0
   sent: (string | ArrayBuffer)[] = []
   onopen: (() => void) | null = null
   onmessage: ((event: { data: string }) => void) | null = null
@@ -80,6 +81,19 @@ describe('translation socket protocol', () => {
     FakeWebSocket.instance.open()
     FakeWebSocket.instance.receive({ type: 'error', code: 'speech_unavailable', message: 'Translated speech is unavailable', recoverable: true })
     await expect(connected).rejects.toThrow('Azure speech is not configured')
+  })
+  it('restarts on the same authenticated socket without Azure when automatic fallback is allowed', async () => {
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const socket = new TranslationSocket({ onMessage: vi.fn(), onClose: vi.fn(), onDrop: vi.fn() })
+    const connected = socket.connect({ source_language: 'auto', target_language: 'mr', save_history: false, synthesize_speech: true, allow_speech_fallback: true })
+    const transport = FakeWebSocket.instance
+    transport.open()
+    transport.receive({ type: 'error', code: 'speech_unavailable', message: 'Speech service is not configured', recoverable: true })
+    expect(JSON.parse(transport.sent[1] as string)).toEqual({ type: 'start', target_language: 'mr', audio_format: 'wav', save_history: false })
+    transport.receive({ type: 'ready', target_language: 'mr', source_language: null, audio_format: 'wav' })
+    await connected
+    expect(socket.usedSpeechFallback()).toBe(true)
+    socket.close()
   })
   it.each(languageRegistry)('serializes $code as the selected WebSocket target', async (entry) => {
     vi.stubGlobal('WebSocket', FakeWebSocket)
@@ -186,5 +200,39 @@ describe('translation socket protocol', () => {
     expect((transport.sent[6] as ArrayBuffer).byteLength).toBe(48)
     transport.close()
     expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('counts unsent queued phrases on disconnect without replaying them', async () => {
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const onDrop = vi.fn()
+    const socket = new TranslationSocket({ onMessage: vi.fn(), onClose: vi.fn(), onDrop })
+    const connected = socket.connect({ source_language: 'en', target_language: 'hi', save_history: false })
+    const transport = FakeWebSocket.instance
+    transport.open()
+    transport.receive({ type: 'ready', target_language: 'hi', source_language: 'en', audio_format: 'wav' })
+    await connected
+    socket.sendAudio(new ArrayBuffer(44))
+    socket.sendAudio(new ArrayBuffer(46))
+    socket.sendAudio(new ArrayBuffer(48))
+    transport.close()
+    expect(onDrop).toHaveBeenCalledTimes(2)
+    expect(socket.queueDepth()).toBe(0)
+  })
+
+  it('rejects a phrase when browser transport buffering is already excessive', async () => {
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const onDrop = vi.fn()
+    const socket = new TranslationSocket({ onMessage: vi.fn(), onClose: vi.fn(), onDrop })
+    const connected = socket.connect({ source_language: 'en', target_language: 'mr', save_history: false })
+    const transport = FakeWebSocket.instance
+    transport.open()
+    transport.receive({ type: 'ready', target_language: 'mr', source_language: 'en', audio_format: 'wav' })
+    await connected
+    transport.bufferedAmount = 2_000_001
+    expect(socket.sendAudio(new ArrayBuffer(44))).toBe(false)
+    expect(onDrop).toHaveBeenCalledOnce()
+    expect(socket.queueDepth()).toBe(0)
+    expect(transport.sent).toHaveLength(1)
+    socket.close()
   })
 })

@@ -6,17 +6,21 @@ function displayMs(value: number | null): string {
   return value >= 1000 ? `${(value / 1000).toFixed(2)} s` : `${Math.round(value)} ms`
 }
 
-export function LatencyDiagnostics({ records, connection, onReset, capture = 'Idle', inputLevel = 0, phraseCount = 0, processing = false, processingErrors = 0, droppedPhrases = 0, droppedSamples = 0, queueDepth = 0, playbackQueueDepth = 0 }: {
+export function LatencyDiagnostics({ records, connection, onReset, capture = 'Idle', inputLevel = 0, capturedPhrases = 0, phraseCount = 0, processing = false, processingErrors = 0, droppedPhrases = 0, droppedSamples = 0, bufferOverflows = 0, websocketDisconnects = 0, playbackFailures = 0, queueDepth = 0, playbackQueueDepth = 0 }: {
   records: PhraseTimingRecord[]
   connection: string
   onReset: () => void
   capture?: string
   inputLevel?: number
+  capturedPhrases?: number
   phraseCount?: number
   processing?: boolean
   processingErrors?: number
   droppedPhrases?: number
   droppedSamples?: number
+  bufferOverflows?: number
+  websocketDisconnects?: number
+  playbackFailures?: number
   queueDepth?: number
   playbackQueueDepth?: number
 }) {
@@ -54,16 +58,17 @@ export function LatencyDiagnostics({ records, connection, onReset, capture = 'Id
         <span>Connection: {connection} · {records.length} recent phrase{records.length === 1 ? '' : 's'} · {summary.completeCount} with playback timing</span>
         <div className="flex flex-wrap gap-2">
           <button type="button" className="btn-secondary" onClick={downloadTimings} disabled={!records.length}><Download size={14} aria-hidden="true" />Download timings</button>
-          <button type="button" className="btn-secondary" onClick={onReset} disabled={!records.length}><RotateCcw size={14} aria-hidden="true" />Reset</button>
+          <button type="button" className="btn-secondary" onClick={onReset} disabled={!records.length && !capturedPhrases && !phraseCount && !processingErrors && !droppedPhrases && !droppedSamples && !bufferOverflows && !websocketDisconnects && !playbackFailures}><RotateCcw size={14} aria-hidden="true" />Reset</button>
         </div>
       </div>
       <dl className="mt-3 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
         {[
           ['Capture', capture], ['Processing', processing ? 'Yes' : 'No'],
-          ['Relative input activity', `${Math.round(inputLevel * 100)}%`], ['Phrases accepted', phraseCount],
+          ['Relative input activity', `${Math.round(inputLevel * 100)}%`], ['Captured phrases', capturedPhrases], ['Phrases accepted', phraseCount],
           ['WebSocket queue', `${queueDepth}/4`], ['Playback queue', `${playbackQueueDepth}/8`],
           ['Processing errors', processingErrors], ['Dropped phrases', droppedPhrases],
-          ['Dropped audio samples', droppedSamples],
+          ['Dropped audio samples', droppedSamples], ['Buffer overflows', bufferOverflows],
+          ['WebSocket disconnects', websocketDisconnects], ['Playback failures', playbackFailures],
         ].map(([label, value]) => <div key={label} className="rounded-lg bg-raised p-2"><dt className="text-muted">{label}</dt><dd className="mt-0.5 font-medium text-foreground">{value}</dd></div>)}
       </dl>
       {!latest ? <p className="mt-3 text-sm text-muted">No phrase timings yet. Start interpreting to collect measurements in memory.</p> : <>

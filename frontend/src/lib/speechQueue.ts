@@ -12,6 +12,7 @@ export type PlaybackTimingEvent =
 export class SpeechQueue {
   private pending: SpeechSynthesisUtterance[] = []
   private active: SpeechSynthesisUtterance | null = null
+  private activeStarted = false
   private seen = new Set<number>()
   private utteranceLanguages = new WeakMap<SpeechSynthesisUtterance, Language>()
   private utteranceTiming = new WeakMap<SpeechSynthesisUtterance, { chunkId: number; queuedAtMs: number; speakCalledAtMs: number | null }>()
@@ -22,6 +23,7 @@ export class SpeechQueue {
     private onPlaybackError: (language: Language) => void = () => undefined,
     private onStatusChange: (status: PlaybackStatus, queued: number) => void = () => undefined,
     private onTiming: (event: PlaybackTimingEvent) => void = () => undefined,
+    private onSettled: (chunkId: number, started: boolean, failed: boolean) => void = () => undefined,
   ) {}
 
   enqueue(chunkId: number, text: string, language: Language, rate: number): EnqueueStatus {
@@ -42,6 +44,7 @@ export class SpeechQueue {
       const timing = this.utteranceTiming.get(utterance)
       if (!timing || this.active !== utterance || timing.speakCalledAtMs === null) return
       utterance.onstart = null
+      this.activeStarted = true
       const startedAtMs = performance.now()
       this.onTiming({
         type: 'started', chunkId: timing.chunkId,
@@ -49,9 +52,10 @@ export class SpeechQueue {
         playbackStartDelayMs: Math.max(0, startedAtMs - timing.speakCalledAtMs),
         startedAtMs,
       })
+      this.reportStatus()
     }
-    utterance.onend = () => this.complete(utterance)
-    utterance.onerror = () => { this.onPlaybackError(language); this.complete(utterance) }
+    utterance.onend = () => this.complete(utterance, false)
+    utterance.onerror = () => { this.onPlaybackError(language); this.complete(utterance, true) }
     const queuedAtMs = performance.now()
     this.utteranceTiming.set(utterance, { chunkId, queuedAtMs, speakCalledAtMs: null })
     this.pending.push(utterance)
@@ -71,32 +75,41 @@ export class SpeechQueue {
     this.seen.clear()
     if (this.active) { this.active.onstart = null; this.active.onend = null; this.active.onerror = null }
     this.active = null
+    this.activeStarted = false
     this.synth.cancel()
     this.reportStatus()
   }
 
-  private complete(utterance: SpeechSynthesisUtterance): void {
+  private complete(utterance: SpeechSynthesisUtterance, failed: boolean): void {
     if (this.active !== utterance) return
+    const id = this.utteranceTiming.get(utterance)?.chunkId
+    const started = this.activeStarted
     this.active = null
+    this.activeStarted = false
+    if (id !== undefined) this.onSettled(id, started, failed)
     this.playNext()
     this.reportStatus()
   }
 
   private reportStatus(): void {
-    this.onStatusChange(!this.active && !this.pending.length ? 'idle' : this.paused ? 'paused' : this.active ? 'playing' : 'idle', this.pending.length)
+    this.onStatusChange(!this.active && !this.pending.length ? 'idle' : this.paused ? 'paused' : this.active && this.activeStarted ? 'playing' : 'idle', this.pending.length)
   }
 
   private playNext(): void {
     if (this.paused || this.active || !this.pending.length) return
     const next = this.pending.shift()!
     this.active = next
+    this.activeStarted = false
     const timing = this.utteranceTiming.get(next)
     if (timing) timing.speakCalledAtMs = performance.now()
     try { this.synth.speak(next); this.reportStatus() }
     catch {
       this.active = null
+      this.activeStarted = false
       const language = this.utteranceLanguages.get(next)
       if (language) this.onPlaybackError(language)
+      const id = this.utteranceTiming.get(next)?.chunkId
+      if (id !== undefined) this.onSettled(id, false, true)
       this.playNext()
     }
   }

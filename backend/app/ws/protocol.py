@@ -61,6 +61,7 @@ class ResultMessage(BaseModel):
     original: str
     translated: str
     detected_language: str | None
+    language_detection_source: Literal["stt", "unknown"] | None = None
     target_language: str
     processing_time_ms: int
     transcription_time_ms: int | None = None
@@ -74,6 +75,10 @@ class ErrorMessage(BaseModel):
     code: str
     message: str
     recoverable: bool
+    chunk_id: int | None = None
+    original: str | None = None
+    detected_language: str | None = None
+    language_detection_source: Literal["stt", "unknown"] | None = None
 
 
 class SpeechAudioMessage(BaseModel):

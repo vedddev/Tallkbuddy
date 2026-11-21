@@ -35,6 +35,26 @@ describe('meeting phrase segmentation', () => {
     expect(onPhrase).not.toHaveBeenCalled()
   })
 
+  it('distinguishes a dropped active phrase from a gap during silence', () => {
+    const segmenter = new PhraseSegmenter(1000, vi.fn())
+    feed(segmenter, 0, 5)
+    expect(segmenter.hasActivePhrase()).toBe(false)
+    feed(segmenter, 0.2, 2)
+    expect(segmenter.hasActivePhrase()).toBe(true)
+    segmenter.reset()
+    expect(segmenter.hasActivePhrase()).toBe(false)
+  })
+
+  it('anchors speech end to capture time when buffered blocks arrive late', () => {
+    const phrases: number[] = []
+    const segmenter = new PhraseSegmenter(1000, (_samples, timing) => phrases.push(timing.speechEndAtMs))
+    let capturedAtMs = 0
+    for (let index = 0; index < 8; index++) segmenter.push(new Float32Array(100).fill(0.2), capturedAtMs += 100)
+    for (let index = 0; index < 7; index++) segmenter.push(new Float32Array(100), capturedAtMs += 100)
+    expect(phrases).toHaveLength(1)
+    expect(phrases[0]).toBe(800)
+  })
+
   it('bounds uninterrupted speech rather than sending an incomplete phrase', () => {
     const onPhrase = vi.fn()
     const onDrop = vi.fn()

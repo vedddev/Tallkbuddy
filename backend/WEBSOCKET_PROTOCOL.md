@@ -21,7 +21,7 @@ First send one UTF-8 JSON `start` message:
 {"type":"start","target_language":"fr","source_language":"en","audio_format":"wav"}
 ```
 
-`target_language` is required. `source_language` is optional; omit it to let Whisper detect the language. Both accept English (`en`), Hindi (`hi`), Marathi (`mr`), Spanish (`es`), German (`de`), French (`fr`), Japanese (`ja`), Russian (`ru`), Mandarin Chinese (`zh-CN`), and Korean (`ko`), or their names. The `zh-CN` source hint is sent to Whisper as ISO-639-1 `zh`. `audio_format` must be `wav` for this MVP. Unknown fields, including client-supplied user IDs, are rejected.
+`target_language` is required. `source_language` is optional; omit it to let Whisper detect the language for each phrase. Both accept English (`en`), Hindi (`hi`), Marathi (`mr`), Spanish (`es`), German (`de`), French (`fr`), Japanese (`ja`), Russian (`ru`), Mandarin Chinese (`zh-CN`), and Korean (`ko`), or their names. A manually selected source is sent as Whisper's language hint and remains the translation hint even if provider metadata differs. The `zh-CN` source hint is sent to Whisper as ISO-639-1 `zh`. `audio_format` must be `wav` for this MVP. Unknown fields, including client-supplied user IDs, are rejected.
 
 Saving is disabled by default. To save results, first set `save_history_enabled: true` through `PATCH /api/preferences`, then create a translation session with matching `target_language`. Start the socket with:
 
@@ -49,7 +49,7 @@ The server processes messages sequentially. A `stop` already queued behind an in
 
 ### Optional generated speech audio
 
-The existing text-only protocol remains the default. A browser or optional desktop client can add `"synthesize_speech":true` to `start`. This requires `AZURE_SPEECH_KEY` and `AZURE_SPEECH_REGION` on the backend; without them the server returns a recoverable `speech_unavailable` error instead of `ready`. Browser WebSockets use the existing HTTP-only session cookie and allowed Origin. Desktop clients can obtain an in-memory session with the existing `/api/auth/login` endpoint; no token belongs in a URL. Remote connections require HTTPS/WSS and trusted TLS certificates.
+The existing text-only protocol remains the default. A browser or optional desktop client can add `"synthesize_speech":true` to `start`. This requires private `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION`, `AZURE_SPEECH_ENDPOINT`, and explicit `AZURE_TTS_ENABLED=true` on the backend; without them the server returns a recoverable `speech_unavailable` error instead of `ready`. The browser client resends `start` without synthesis on the same authenticated socket and uses a matching browser voice or captions. Browser WebSockets use the existing HTTP-only session cookie and allowed Origin. Desktop clients can obtain an in-memory session with the existing `/api/auth/login` endpoint; no token belongs in a URL. Remote connections require HTTPS/WSS and trusted TLS certificates.
 
 After each `result`, an opted-in client receives exactly one further JSON message with the same `chunk_id`: either `speech_audio` or `speech_error`. Wait for it before sending the next WAV phrase to preserve playback order. The browser client validates this WAV, queues playback locally, and does not send it into another application. Speech audio is **generated translated speech**, never microphone audio:
 
@@ -74,10 +74,12 @@ For each valid binary chunk, the server sends `processing`, followed by `result`
 ```
 
 ```json
-{"type":"result","chunk_id":1,"original":"Hello","translated":"Bonjour","detected_language":"en","target_language":"fr","processing_time_ms":842}
+{"type":"result","chunk_id":1,"original":"Hello","translated":"Bonjour","detected_language":"en","language_detection_source":"stt","target_language":"fr","processing_time_ms":842}
 ```
 
-`chunk_id` starts at 1 and increases for accepted chunks. `detected_language` can be `null` when Groq does not return language metadata. `processing_time_ms` measures backend processing, including provider calls; it is not an end-to-end latency guarantee.
+`chunk_id` starts at 1 and increases for accepted chunks. `detected_language` is the normalized provider-reported language code when recognized, including supported extra source codes such as `it`, or `null` if metadata is missing or unrecognized. `language_detection_source` is `stt` or `unknown` in new responses; older clients can ignore it. `stt` means the value came from the transcription response, which may have been influenced by an explicit source hint. No confidence score is invented. Recognition is phrase-level and mixed-language speech is best effort. When reliable detected source and target match, the original text is returned unchanged and the translation LLM is skipped. `processing_time_ms` measures backend processing, including provider calls; it is not an end-to-end latency guarantee.
+
+If STT succeeds but translation fails, `error` may also include `chunk_id`, `original`, `detected_language`, and `language_detection_source`. The browser can keep the original caption while showing that translation is unavailable. These fields are omitted for errors that occur before transcription.
 
 The browser keeps a local UUID for each completed phrase and associates it with the server's per-connection `chunk_id` through its single in-flight request. Local UUIDs are not sent or persisted. `chunk_id` restarts on a new connection. On disconnect, unsent and in-flight phrases are discarded instead of replayed; exactly-once processing cannot be inferred from a dropped connection. Saved-history `request_id` remains the existing server-side idempotency key for explicitly opted-in text history.
 

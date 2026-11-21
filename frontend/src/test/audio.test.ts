@@ -1,7 +1,31 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { encodePcmWav, startAudioCapture } from '../lib/audio'
+import { captureWorkletCode, encodePcmWav, startAudioCapture } from '../lib/audio'
 
 afterEach(() => { vi.unstubAllGlobals() })
+
+it('buffers a short main-thread pause and reports bounded overflow before newer audio', () => {
+  class Processor {
+    port = { onmessage: null as ((event: { data: string }) => void) | null, postMessage: vi.fn() }
+  }
+  const Capture = new Function('AudioWorkletProcessor', 'sampleRate', 'currentTime', 'registerProcessor',
+    `${captureWorkletCode}\nreturn TalkBuddyCapture;`)(Processor, 1000, 0, () => undefined) as new () => Processor & {
+      process: (inputs: Float32Array[][]) => boolean
+    }
+  const capture = new Capture()
+  const frame = () => capture.process([[new Float32Array(128).fill(0.1)]])
+  frame()
+  expect(capture.port.postMessage).toHaveBeenCalledTimes(1)
+  for (let index = 0; index < 8; index++) frame()
+  expect(capture.port.postMessage).toHaveBeenCalledTimes(1)
+  capture.port.onmessage?.({ data: 'ack' })
+  expect(capture.port.postMessage).toHaveBeenCalledTimes(2)
+  expect(capture.port.postMessage.mock.calls[1][0].droppedSamples).toBe(0)
+  for (let index = 0; index < 9; index++) frame()
+  capture.port.onmessage?.({ data: 'ack' })
+  expect(capture.port.postMessage.mock.calls[2][0].droppedSamples).toBe(9 * 128)
+  expect(capture.port.postMessage.mock.calls[2][0].overflowEvents).toBe(1)
+  expect(capture.port.postMessage.mock.calls[2][0].samples).toHaveLength(128)
+})
 
 describe('PCM WAV encoding', () => {
   it('creates an independently decodable mono 16-bit WAV file', () => {

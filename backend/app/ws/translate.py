@@ -22,6 +22,7 @@ from app.ai.service import (
     AIService,
     ai_service_context,
 )
+from app.ai.languages import normalize_detected_language
 from app.ai.tts import TTSError, synthesize_wav, tts_configured
 from app.auth.security import SESSION_COOKIE_NAME
 from app.auth.service import find_active_session
@@ -64,10 +65,16 @@ async def _send(websocket: WebSocket, message: BaseModel) -> bool:
             payload.pop("saved")
             payload.pop("message_id")
         if isinstance(message, ResultMessage):
+            if message.language_detection_source is None:
+                payload.pop("language_detection_source")
             if message.transcription_time_ms is None:
                 payload.pop("transcription_time_ms")
             if message.translation_time_ms is None:
                 payload.pop("translation_time_ms")
+        if isinstance(message, ErrorMessage):
+            for field in ("chunk_id", "original", "detected_language", "language_detection_source"):
+                if payload[field] is None:
+                    payload.pop(field)
         await websocket.send_json(payload)
         return True
     except (WebSocketDisconnect, OSError, RuntimeError):
@@ -75,7 +82,9 @@ async def _send(websocket: WebSocket, message: BaseModel) -> bool:
 
 
 async def _error(
-    websocket: WebSocket, code: str, message: str, recoverable: bool
+    websocket: WebSocket, code: str, message: str, recoverable: bool,
+    *, chunk_id: int | None = None, original: str | None = None,
+    detected_language: str | None = None,
 ) -> bool:
     metrics = getattr(websocket.app.state, "metrics", None)
     if metrics is not None:
@@ -85,7 +94,11 @@ async def _error(
         elif code in {"provider_unavailable", "provider_error"}:
             metrics.increment("provider_errors")
     return await _send(
-        websocket, ErrorMessage(code=code, message=message, recoverable=recoverable)
+        websocket, ErrorMessage(
+            code=code, message=message, recoverable=recoverable,
+            chunk_id=chunk_id, original=original, detected_language=detected_language,
+            language_detection_source=("stt" if detected_language else "unknown") if original else None,
+        )
     )
 
 
@@ -251,6 +264,7 @@ async def _process_chunk(
                 await _close(websocket, 1008)
                 return False
             message_id, original, translated, detected = cached
+            detected = normalize_detected_language(detected)
             return await _send_result_and_speech(
                 websocket,
                 ResultMessage(
@@ -258,6 +272,7 @@ async def _process_chunk(
                     original=original,
                     translated=translated,
                     detected_language=detected,
+                    language_detection_source="stt" if detected else "unknown",
                     target_language=start.target_language,
                     processing_time_ms=max(0, int((perf_counter() - began) * 1000)),
                     saved=True,
@@ -266,6 +281,8 @@ async def _process_chunk(
                 start, db, token, user_id, settings,
             )
 
+    transcription = None
+    detected_source = None
     try:
         async with asyncio.timeout(settings.ws_processing_timeout_seconds):
             transcription_began = perf_counter()
@@ -278,9 +295,18 @@ async def _process_chunk(
                 await _error(websocket, "session_invalid", "Session is no longer valid", False)
                 await _close(websocket, 1008)
                 return False
+            detected_source = normalize_detected_language(transcription.detected_language)
+            source_for_translation = start.source_language or detected_source
             translation_began = perf_counter()
-            translation = await service.translate(transcription.text, start.target_language)
-            translation_time_ms = max(0, int((perf_counter() - translation_began) * 1000))
+            if detected_source == start.target_language and source_for_translation == start.target_language:
+                translated_text = transcription.text
+                translation_time_ms = 0
+            else:
+                translation = await service.translate(
+                    transcription.text, start.target_language, source_language=source_for_translation
+                )
+                translated_text = translation.translated_text
+                translation_time_ms = max(0, int((perf_counter() - translation_began) * 1000))
             if await _active_user_id(db, token) != user_id:
                 await _error(websocket, "session_invalid", "Session is no longer valid", False)
                 await _close(websocket, 1008)
@@ -289,7 +315,7 @@ async def _process_chunk(
                 assert start.session_id is not None and request_id is not None and fingerprint is not None
                 saved = await save_translation(
                     db, user_id, start.session_id, start.target_language, request_id, fingerprint,
-                    transcription.text, translation.translated_text, transcription.detected_language,
+                    transcription.text, translated_text, detected_source,
                 )
                 original = saved.original_text
                 translated = saved.translated_text
@@ -297,21 +323,33 @@ async def _process_chunk(
                 message_id = saved.id
             else:
                 original = transcription.text
-                translated = translation.translated_text
-                detected = transcription.detected_language
+                translated = translated_text
+                detected = detected_source
                 message_id = None
     except AINoSpeechError:
         return await _error(websocket, "no_speech", "No speech detected", True)
     except AIProviderTimeout:
-        return await _error(websocket, "provider_timeout", "AI provider timed out", True)
+        return await _error(websocket, "provider_timeout", "AI provider timed out", True,
+                            chunk_id=chunk_id if transcription else None,
+                            original=transcription.text if transcription else None,
+                            detected_language=detected_source)
     except AIProviderUnavailable:
-        return await _error(websocket, "provider_unavailable", "AI provider unavailable", True)
+        return await _error(websocket, "provider_unavailable", "AI provider unavailable", True,
+                            chunk_id=chunk_id if transcription else None,
+                            original=transcription.text if transcription else None,
+                            detected_language=detected_source)
     except AIProviderFailure:
-        return await _error(websocket, "provider_error", "AI processing failed", True)
+        return await _error(websocket, "provider_error", "AI processing failed", True,
+                            chunk_id=chunk_id if transcription else None,
+                            original=transcription.text if transcription else None,
+                            detected_language=detected_source)
     except AIInputError:
         return await _error(websocket, "invalid_input", "Audio could not be processed", True)
     except TimeoutError:
-        return await _error(websocket, "processing_timeout", "Processing timed out", True)
+        return await _error(websocket, "processing_timeout", "Processing timed out", True,
+                            chunk_id=chunk_id if transcription else None,
+                            original=transcription.text if transcription else None,
+                            detected_language=detected_source)
     except (HistoryDisabled, HistoryNotFound, HistorySessionEnded, HistoryConflict, SQLAlchemyError) as exc:
         await db.rollback()
         return await _history_error(websocket, exc)
@@ -329,6 +367,7 @@ async def _process_chunk(
             original=original,
             translated=translated,
             detected_language=detected,
+            language_detection_source="stt" if detected else "unknown",
             target_language=start.target_language,
             processing_time_ms=elapsed_ms,
             transcription_time_ms=transcription_time_ms,

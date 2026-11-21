@@ -3,6 +3,7 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.audio import read_audio_upload
@@ -13,7 +14,7 @@ from app.ai.schemas import (
     TranslationRequest,
     TranslationResponse,
 )
-from app.ai.service import AIService, AIInputError, get_ai_service
+from app.ai.service import AIService, AIInputError, AIServiceError, get_ai_service
 from app.auth.dependencies import AuthenticatedSession, require_csrf
 from app.api.auth import require_trusted_origin
 from app.core.config import Settings
@@ -94,7 +95,7 @@ async def speech_translate(
     service: AIService = Depends(get_ai_service),
     db: AsyncSession = Depends(get_db_session),
     idempotency_key: UUID | None = Header(default=None, alias="Idempotency-Key"),
-) -> SpeechTranslationResponse:
+) -> SpeechTranslationResponse | JSONResponse:
     try:
         language = parse_target_language(target_language)
     except ValueError:
@@ -118,11 +119,24 @@ async def speech_translate(
                 message_id=saved.id,
             )
     transcription = await service.transcribe(data, filename)
-    translation = await service.translate(transcription.text, language)
+    if transcription.detected_language == language:
+        translated_text = transcription.text
+    else:
+        try:
+            translation = await service.translate(
+                transcription.text, language, source_language=transcription.detected_language
+            )
+        except AIServiceError as exc:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"detail": exc.public_detail, "original_text": transcription.text,
+                         "detected_language": transcription.detected_language},
+            )
+        translated_text = translation.translated_text
     if save_history:
         saved = await save_translation(
             db, authenticated.user.id, session_id, language, idempotency_key, fingerprint,
-            transcription.text, translation.translated_text, transcription.detected_language,
+            transcription.text, translated_text, transcription.detected_language,
         )
         original_text = saved.original_text
         translated_text = saved.translated_text
@@ -130,7 +144,6 @@ async def speech_translate(
         message_id = saved.id
     else:
         original_text = transcription.text
-        translated_text = translation.translated_text
         detected_language = transcription.detected_language
         message_id = None
     return SpeechTranslationResponse(

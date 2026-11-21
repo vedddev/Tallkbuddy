@@ -35,6 +35,7 @@ export class GeneratedSpeechQueue {
   private active: HTMLAudioElement | null = null
   private activeStarted = false
   private activeUrl: string | null = null
+  private activeId: number | null = null
   private seen = new Set<number>()
   private paused = false
 
@@ -42,6 +43,7 @@ export class GeneratedSpeechQueue {
     private onStatus: (status: PlaybackStatus, pending: number) => void = () => undefined,
     private onError: (message: string) => void = () => undefined,
     private onStarted: (id: number, startedAtMs: number, queueWaitMs: number, playbackStartDelayMs: number) => void = () => undefined,
+    private onSettled: (id: number, started: boolean, failed: boolean) => void = () => undefined,
   ) {}
 
   enqueue(id: number, encoded: string): boolean {
@@ -78,17 +80,19 @@ export class GeneratedSpeechQueue {
   private release(): void {
     if (this.active) { this.active.onended = null; this.active.onerror = null; this.active.onplaying = null; this.active.pause(); this.active.removeAttribute('src'); this.active.load(); this.active = null }
     this.activeStarted = false
+    this.activeId = null
     if (this.activeUrl) { URL.revokeObjectURL(this.activeUrl); this.activeUrl = null }
   }
-  private fail(message: string): void { this.onError(message); this.release(); this.next(); this.report() }
+  private fail(message: string): void { const id = this.activeId; const started = this.activeStarted; this.onError(message); this.release(); if (id !== null) this.onSettled(id, started, true); this.next(); this.report() }
   private next(): void {
     if (this.paused || this.active || !this.pending.length) return
     const item = this.pending.shift()!
     const url = URL.createObjectURL(item.blob)
     let audio: HTMLAudioElement
     try { audio = new Audio(url) }
-    catch { URL.revokeObjectURL(url); this.onError('Generated speech could not be played. Captions will continue.'); this.next(); return }
+    catch { URL.revokeObjectURL(url); this.onError('Generated speech could not be played. Captions will continue.'); this.onSettled(item.id, false, true); this.next(); return }
     this.active = audio
+    this.activeId = item.id
     this.activeUrl = url
     const playCalledAtMs = performance.now()
     audio.onplaying = () => {
@@ -99,7 +103,7 @@ export class GeneratedSpeechQueue {
       this.onStarted(item.id, startedAtMs, Math.max(0, playCalledAtMs - item.queuedAtMs), Math.max(0, startedAtMs - playCalledAtMs))
       this.report()
     }
-    audio.onended = () => { this.release(); this.next(); this.report() }
+    audio.onended = () => { this.release(); this.onSettled(item.id, true, false); this.next(); this.report() }
     audio.onerror = () => this.fail('Generated speech could not be played. Captions will continue.')
     try { void audio.play().catch(() => { if (this.active === audio) this.fail('Browser blocked translated audio. Interact with the page and retry.') }) }
     catch { if (this.active === audio) this.fail('Browser blocked translated audio. Interact with the page and retry.') }

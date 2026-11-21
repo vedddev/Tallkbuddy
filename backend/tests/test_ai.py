@@ -94,6 +94,8 @@ def test_real_groq_sdk_serializes_audio_upload_without_network() -> None:
         assert request.url.path.endswith("/audio/transcriptions")
         assert b"audio.wav" in request.content
         assert b"whisper-large-v3-turbo" in request.content
+        assert b"verbose_json" in request.content
+        assert b'name="language"' not in request.content
         return httpx.Response(200, json={"text": "Hello", "language": "english"})
 
     async def exercise() -> TranscriptionResponse:
@@ -171,6 +173,15 @@ def test_groq_sdk_retries_one_transient_failure_without_network() -> None:
 
     assert asyncio.run(exercise()).translated_text == "Bonjour"
     assert attempts == 2
+
+
+def test_translation_prompt_uses_detected_source_as_metadata() -> None:
+    client = make_groq_client(completion=completion("Hello"))
+    result = asyncio.run(AIService(client, Settings(_env_file=None)).translate("नमस्कार", "en", source_language="mr"))
+    payload = json.loads(client.chat.completions.create.await_args.kwargs["messages"][1]["content"])
+    assert payload["source_language"] == "Marathi"
+    assert payload["source_text"] == "नमस्कार"
+    assert result.translated_text == "Hello"
 
 
 def test_transcription_rejects_empty_provider_result() -> None:
@@ -436,7 +447,33 @@ def test_speech_translate_chains_services(protected_ai: AuthHarness) -> None:
         "target_language": "fr",
     }
     protected_ai.ai_service.transcribe.assert_awaited_once()
-    protected_ai.ai_service.translate.assert_awaited_once_with("Hello world", "fr")
+    protected_ai.ai_service.translate.assert_awaited_once_with("Hello world", "fr", source_language="en")
+
+
+def test_speech_translate_same_detected_language_keeps_original(protected_ai: AuthHarness) -> None:
+    protected_ai.ai_service.transcribe.return_value = TranscriptionResponse(text="नमस्ते", detected_language="hi")
+    response = protected_ai.client.post(
+        "/api/ai/speech-translate",
+        files={"audio": ("sample.wav", WAV_AUDIO, "audio/wav")},
+        data={"target_language": "hi"}, headers=csrf_headers(protected_ai),
+    )
+    assert response.status_code == 200
+    assert response.json()["translated_text"] == "नमस्ते"
+    protected_ai.ai_service.translate.assert_not_awaited()
+
+
+def test_speech_translate_failure_preserves_original_with_generic_error(protected_ai: AuthHarness) -> None:
+    protected_ai.ai_service.translate.side_effect = AIProviderFailure("private provider details")
+    response = protected_ai.client.post(
+        "/api/ai/speech-translate",
+        files={"audio": ("sample.wav", WAV_AUDIO, "audio/wav")},
+        data={"target_language": "fr"}, headers=csrf_headers(protected_ai),
+    )
+    assert response.status_code == 502
+    assert response.json() == {
+        "detail": "AI service failed", "original_text": "Hello world", "detected_language": "en",
+    }
+    assert "private provider details" not in response.text
 
 
 @pytest.mark.parametrize("path", ["transcribe", "translate", "speech-translate"])

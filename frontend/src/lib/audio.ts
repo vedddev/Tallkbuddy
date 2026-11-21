@@ -53,10 +53,24 @@ class TalkBuddyCapture extends AudioWorkletProcessor {
     this.block = new Float32Array(this.blockSize);
     this.used = 0;
     this.waiting = false;
+    this.pending = [];
+    this.maxPending = 8;
     this.droppedSamples = 0;
+    this.overflowEvents = 0;
     this.port.onmessage = (event) => {
-      if (event.data === 'ack') this.waiting = false;
+      if (event.data === 'ack') {
+        this.waiting = false;
+        this.flush();
+      }
     };
+  }
+  flush() {
+    if (this.waiting || !this.pending.length) return;
+    const block = this.pending.shift();
+    this.port.postMessage({ samples: block.samples, capturedAtAudioTime: block.capturedAtAudioTime, droppedSamples: this.droppedSamples, overflowEvents: this.overflowEvents }, [block.samples.buffer]);
+    this.droppedSamples = 0;
+    this.overflowEvents = 0;
+    this.waiting = true;
   }
   process(inputs) {
     const channels = inputs[0];
@@ -66,15 +80,16 @@ class TalkBuddyCapture extends AudioWorkletProcessor {
         for (const channel of channels) sample += channel[i] / channels.length;
         this.block[this.used++] = Number.isFinite(sample) ? Math.max(-1, Math.min(1, sample)) : 0;
         if (this.used === this.blockSize) {
-          if (this.waiting) this.droppedSamples += this.used;
-          else {
-            const samples = this.block;
-            this.port.postMessage({ samples, droppedSamples: this.droppedSamples }, [samples.buffer]);
-            this.waiting = true;
-            this.droppedSamples = 0;
+          if (this.pending.length >= this.maxPending) {
+            this.overflowEvents++;
+            for (const pending of this.pending) this.droppedSamples += pending.samples.length;
+            this.droppedSamples += this.used;
+            this.pending = [];
           }
+          else this.pending.push({ samples: this.block, capturedAtAudioTime: currentTime + (i + 1) / sampleRate });
           this.block = new Float32Array(this.blockSize);
           this.used = 0;
+          this.flush();
         }
       }
     }
@@ -87,14 +102,18 @@ registerProcessor('talkbuddy-capture', TalkBuddyCapture);
 export interface CapturedAudioBlock {
   samples: Float32Array
   droppedSamples: number
+  overflowEvents?: number
+  capturedAtAudioTime?: number
 }
 
 export function unpackAudioBlock(value: unknown): CapturedAudioBlock | null {
-  if (value instanceof Float32Array) return { samples: value, droppedSamples: 0 }
+  if (value instanceof Float32Array) return { samples: value, droppedSamples: 0, overflowEvents: 0 }
   if (!value || typeof value !== 'object') return null
   const block = value as Partial<CapturedAudioBlock>
   if (!(block.samples instanceof Float32Array) || !Number.isFinite(block.droppedSamples) || (block.droppedSamples ?? -1) < 0) return null
-  return { samples: block.samples, droppedSamples: block.droppedSamples! }
+  if (block.capturedAtAudioTime !== undefined && (!Number.isFinite(block.capturedAtAudioTime) || block.capturedAtAudioTime < 0)) return null
+  if (block.overflowEvents !== undefined && (!Number.isSafeInteger(block.overflowEvents) || block.overflowEvents < 0)) return null
+  return { samples: block.samples, droppedSamples: block.droppedSamples!, overflowEvents: block.overflowEvents ?? 0, capturedAtAudioTime: block.capturedAtAudioTime }
 }
 
 export interface AudioCapture { stop: () => Promise<void>; abort: () => Promise<void> }

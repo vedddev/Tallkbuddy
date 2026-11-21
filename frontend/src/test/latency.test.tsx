@@ -66,6 +66,22 @@ it('bounds in-memory records and renders an honest empty/reset state', () => {
   expect(reset).toHaveBeenCalledOnce()
 })
 
+it('shows explicit reliability counters without inventing latency samples', () => {
+  const reset = vi.fn()
+  render(<LatencyDiagnostics records={[]} connection="Disconnected" onReset={reset}
+    capturedPhrases={5} phraseCount={3} droppedPhrases={2} bufferOverflows={1} websocketDisconnects={1} playbackFailures={1} />)
+  fireEvent.click(screen.getByText(/Diagnostics/))
+  expect(screen.getByText('Captured phrases').nextElementSibling).toHaveTextContent('5')
+  expect(screen.getByText('Phrases accepted').nextElementSibling).toHaveTextContent('3')
+  expect(screen.getByText('Dropped phrases').nextElementSibling).toHaveTextContent('2')
+  expect(screen.getByText('Buffer overflows').nextElementSibling).toHaveTextContent('1')
+  expect(screen.getByText('WebSocket disconnects').nextElementSibling).toHaveTextContent('1')
+  expect(screen.getByText('Playback failures').nextElementSibling).toHaveTextContent('1')
+  expect(screen.getByText(/No phrase timings yet/)).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: 'Reset' }))
+  expect(reset).toHaveBeenCalledOnce()
+})
+
 it('exports only finite numeric timings, never phrase text or identifiers', () => {
   const record = timingRecord(1, result, {
     capture: { speechEndAtMs: 100, captureDurationMs: 1200, phraseId: 'private-phrase' },

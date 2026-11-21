@@ -8,6 +8,7 @@ export interface SocketConfig {
   save_history: boolean
   session_id?: string
   synthesize_speech?: boolean
+  allow_speech_fallback?: boolean
 }
 
 interface Callbacks {
@@ -30,15 +31,18 @@ export class TranslationSocket {
   private inFlightTiming: { submittedAtMs: number; capture?: CaptureTiming } | null = null
   private config: SocketConfig | null = null
   private intentionalClose = false
+  private speechFallbackUsed = false
 
   constructor(private callbacks: Callbacks) {}
 
   isOpen(): boolean { return this.socket?.readyState === WebSocket.OPEN }
   queueDepth(): number { return this.queued.length + Number(this.inflight) }
+  usedSpeechFallback(): boolean { return this.speechFallbackUsed }
   private reportQueue(): void { this.callbacks.onQueueChange?.(this.queueDepth()) }
 
   async connect(config: SocketConfig): Promise<void> {
     this.close()
+    this.speechFallbackUsed = false
     this.config = config
     this.intentionalClose = false
     const socket = new WebSocket(socketUrl())
@@ -52,15 +56,16 @@ export class TranslationSocket {
         window.clearTimeout(timeout)
         reject(new Error(message))
       }
-      socket.onopen = () => {
+      const sendStart = (speech: boolean) => {
         socket.send(JSON.stringify({
           type: 'start', target_language: config.target_language,
           ...(config.source_language === 'auto' ? {} : { source_language: config.source_language }),
           audio_format: 'wav', save_history: config.save_history,
-          ...(config.synthesize_speech ? { synthesize_speech: true } : {}),
+          ...(speech ? { synthesize_speech: true } : {}),
           ...(config.save_history ? { session_id: config.session_id } : {}),
         }))
       }
+      socket.onopen = () => sendStart(Boolean(config.synthesize_speech))
       socket.onmessage = (event) => {
         if (this.socket !== socket) return
         const receivedAtMs = performance.now()
@@ -70,6 +75,14 @@ export class TranslationSocket {
           if (!message || typeof message !== 'object' || typeof message.type !== 'string') throw new Error('Invalid message')
         }
         catch { fail('The server sent an invalid message.'); socket.close(); return }
+        if (message.type === 'error' && message.code === 'speech_unavailable' && !settled && config.synthesize_speech && config.allow_speech_fallback) {
+          this.speechFallbackUsed = true
+          config = { ...config, synthesize_speech: false }
+          this.config = config
+          this.callbacks.onMessage(message)
+          sendStart(false)
+          return
+        }
         if (message.type === 'ready') {
           if (!settled) { settled = true; window.clearTimeout(timeout); resolve() }
         }
@@ -97,6 +110,8 @@ export class TranslationSocket {
         if (!isCurrent) return
         this.inflight = false
         this.inFlightTiming = null
+        // Queued phrases were never submitted and must not be replayed after reconnect.
+        for (const _item of this.queued) this.callbacks.onDrop()
         this.queued = []
         this.reportQueue()
         this.socket = null
@@ -113,12 +128,22 @@ export class TranslationSocket {
       this.reportQueue()
       return true
     }
+    if (this.socket.bufferedAmount > 2_000_000) { this.callbacks.onDrop(); return false }
     this.inflight = true
     this.reportQueue()
-    if (this.config.save_history) this.socket.send(JSON.stringify({ type: 'chunk', request_id: crypto.randomUUID() }))
-    this.inFlightTiming = { submittedAtMs: performance.now(), capture }
-    this.socket.send(wav)
-    return true
+    try {
+      if (this.config.save_history) this.socket.send(JSON.stringify({ type: 'chunk', request_id: crypto.randomUUID() }))
+      this.inFlightTiming = { submittedAtMs: performance.now(), capture }
+      this.socket.send(wav)
+      return true
+    } catch {
+      this.inflight = false
+      this.inFlightTiming = null
+      this.callbacks.onDrop()
+      this.reportQueue()
+      this.socket.close()
+      return false
+    }
   }
 
   private flush(): void {

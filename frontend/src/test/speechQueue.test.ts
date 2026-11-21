@@ -56,6 +56,8 @@ it('plays translations once and in order without overlap', () => {
   expect(spoken).toHaveLength(1)
   expect(spoken[0].lang).toBe('hi-IN')
   expect(spoken[0].voice?.lang).toBe('hi-IN')
+  expect(onStatus).toHaveBeenCalledWith('idle', 1)
+  spoken[0].onstart?.(new Event('start') as SpeechSynthesisEvent)
   expect(onStatus).toHaveBeenCalledWith('playing', 1)
   queue.pause()
   expect(onStatus).toHaveBeenLastCalledWith('paused', 1)

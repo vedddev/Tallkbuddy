@@ -56,10 +56,11 @@ export type SocketMessage =
   | { type: 'processing'; chunk_id: number }
   | {
       type: 'result'; chunk_id: number; original: string; translated: string
-      detected_language: Language | null; target_language: Language; processing_time_ms: number
+      detected_language: string | null; language_detection_source?: 'stt' | 'unknown'
+      target_language: Language; processing_time_ms: number
       transcription_time_ms?: number; translation_time_ms?: number
       saved?: boolean; message_id?: string
     }
-  | { type: 'error'; code: string; message: string; recoverable: boolean }
+  | { type: 'error'; code: string; message: string; recoverable: boolean; chunk_id?: number; original?: string; detected_language?: string | null; language_detection_source?: 'stt' | 'unknown' }
   | { type: 'speech_audio'; chunk_id: number; audio_format: 'wav'; audio_base64: string; preparation_time_ms?: number }
   | { type: 'speech_error'; chunk_id: number; code: string; message: string }

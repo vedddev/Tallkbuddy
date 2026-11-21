@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     groq_max_retries: int = Field(default=2, ge=0, le=3)
     azure_speech_key: SecretStr | None = None
     azure_speech_region: str | None = None
+    azure_speech_endpoint: str | None = None
+    azure_tts_enabled: bool = False
     tts_timeout_seconds: float = Field(default=20.0, ge=1.0, le=60.0)
     tts_max_audio_bytes: int = Field(default=2 * 1024 * 1024, ge=1024, le=10 * 1024 * 1024)
     ai_max_audio_bytes: int = Field(default=10 * 1024 * 1024, ge=1, le=25_000_000)
@@ -100,6 +102,12 @@ class Settings(BaseSettings):
         azure_key = self.azure_speech_key.get_secret_value() if self.azure_speech_key else ""
         if azure_key.startswith(("replace-with-", "your_")) or bool(azure_key) != bool(self.azure_speech_region):
             raise RuntimeError("Azure Speech key and region must be configured together")
+        if self.azure_tts_enabled and not (azure_key and self.azure_speech_region and self.azure_speech_endpoint):
+            raise RuntimeError("Enabled Azure speech requires key, region, and resource endpoint")
+        if self.azure_tts_enabled:
+            from app.ai.tts import tts_configured
+            if not tts_configured(self):
+                raise RuntimeError("Enabled Azure speech configuration is invalid")
 
 
 def _valid_https_origin(value: str) -> bool:

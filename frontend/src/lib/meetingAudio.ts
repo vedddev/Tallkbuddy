@@ -38,6 +38,7 @@ export class PhraseSegmenter {
   private noiseFloor = 0.002
   private active = false
   private speechStartAtMs: number | null = null
+  private lastBlockCapturedAtMs: number | null = null
   private options: VadOptions
 
   constructor(
@@ -47,8 +48,9 @@ export class PhraseSegmenter {
     options: Partial<VadOptions> = {},
   ) { this.options = vadOptions(options) }
 
-  push(block: Float32Array): void {
+  push(block: Float32Array, capturedAtMs = performance.now()): void {
     if (!block.length) return
+    this.lastBlockCapturedAtMs = capturedAtMs
     let sum = 0
     for (const sample of block) sum += sample * sample
     const rms = Math.sqrt(sum / block.length)
@@ -65,7 +67,7 @@ export class PhraseSegmenter {
       this.candidateSamples = voiced ? this.candidateSamples + block.length : 0
       if (this.candidateSamples < this.sampleRate * this.options.onsetMs / 1000) return
       this.active = true
-      this.speechStartAtMs = performance.now() - this.candidateSamples / this.sampleRate * 1000
+      this.speechStartAtMs = capturedAtMs - this.candidateSamples / this.sampleRate * 1000
       this.segment = this.preroll
       this.segmentSamples = this.prerollSamples
       this.voicedSamples = this.candidateSamples
@@ -102,13 +104,16 @@ export class PhraseSegmenter {
     this.trailingSilence = 0
     this.active = false
     this.speechStartAtMs = null
+    this.lastBlockCapturedAtMs = null
   }
+
+  hasActivePhrase(): boolean { return this.active }
 
   private finish(): void {
     if (this.voicedSamples < this.sampleRate * this.options.minimumSpeechMs / 1000) { this.reset(); return }
     // The phrase boundary is detected after trailing silence. Estimate the
     // speech end on this browser's monotonic clock without changing VAD.
-    const speechEndAtMs = performance.now() - this.trailingSilence / this.sampleRate * 1000
+    const speechEndAtMs = (this.lastBlockCapturedAtMs ?? performance.now()) - this.trailingSilence / this.sampleRate * 1000
     const keep = Math.min(this.segmentSamples, this.segmentSamples - this.trailingSilence + Math.floor(this.sampleRate * this.options.trailingPaddingMs / 1000))
     const speechStartAtMs = this.speechStartAtMs
     const joined = new Float32Array(keep)
@@ -138,7 +143,7 @@ export async function startMeetingCapture(
   onDrop: () => void,
   muteOriginal: boolean,
   onActivity?: (level: number) => void,
-  onDroppedSamples?: (count: number) => void,
+  onDroppedSamples?: (count: number, discardedPhrase: boolean, overflowEvents: number) => void,
 ): Promise<MeetingCapture> {
   return startPhraseCapture('meeting', onChunk, onEnded, onDrop, muteOriginal, onActivity, undefined, onDroppedSamples)
 }
@@ -149,7 +154,7 @@ export async function startMicrophoneCapture(
   onDrop: () => void,
   deviceId?: string,
   onActivity?: (level: number) => void,
-  onDroppedSamples?: (count: number) => void,
+  onDroppedSamples?: (count: number, discardedPhrase: boolean, overflowEvents: number) => void,
 ): Promise<MeetingCapture> {
   return startPhraseCapture('microphone', onChunk, onEnded, onDrop, false, onActivity, deviceId, onDroppedSamples)
 }
@@ -162,7 +167,7 @@ async function startPhraseCapture(
   muteOriginal: boolean,
   onActivity?: (level: number) => void,
   deviceId?: string,
-  onDroppedSamples?: (count: number) => void,
+  onDroppedSamples?: (count: number, discardedPhrase: boolean, overflowEvents: number) => void,
 ): Promise<MeetingCapture> {
   if (mode === 'meeting' && !navigator.mediaDevices?.getDisplayMedia) throw new Error('Tab audio capture is unavailable in this browser or context.')
   if (mode === 'microphone' && !navigator.mediaDevices?.getUserMedia) throw new Error('Microphone capture is unavailable in this browser or context.')
@@ -225,10 +230,18 @@ async function startPhraseCapture(
       if (stopped) return
       const block = unpackAudioBlock(event.data)
       node?.port.postMessage?.('ack')
-      if (block?.droppedSamples) { segmenter.reset(); onDroppedSamples?.(block.droppedSamples) }
+      if (block?.droppedSamples) {
+        const discardedPhrase = segmenter.hasActivePhrase()
+        segmenter.reset()
+        onDroppedSamples?.(block.droppedSamples, discardedPhrase, block.overflowEvents ?? 0)
+      }
       if (!paused && block?.samples.length) {
-        segmenter.push(block.samples)
+        const audioTime = block.capturedAtAudioTime
         const now = performance.now()
+        const capturedAtMs = audioTime !== undefined && Number.isFinite(context!.currentTime)
+          ? now - Math.max(0, (context!.currentTime - audioTime) * 1000)
+          : now
+        segmenter.push(block.samples, capturedAtMs)
         if (onActivity && now - lastActivityAt >= 100) {
           let sum = 0
           for (const sample of block.samples) sum += sample * sample
