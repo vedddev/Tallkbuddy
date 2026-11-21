@@ -121,6 +121,9 @@ def test_interim_caption_is_provisional_and_final_pipeline_unchanged(ws_harness:
         assert socket.receive_json()["type"] == "processing"
         assert socket.receive_json()["type"] == "result"
         socket.send_json({"type": "stop"})
+        with pytest.raises(WebSocketDisconnect) as closed:
+            socket.receive_json()
+        assert closed.value.code == 1000
     assert ws_harness.ws_service.transcribe.await_count == 2
     assert ws_harness.ws_service.transcribe.await_args_list[0].args == (interim_wav(), "interim.wav")
     ws_harness.ws_service.translate.assert_awaited_once()
@@ -143,6 +146,9 @@ def test_interim_rate_and_request_limits(ws_harness: AuthHarness) -> None:
             if revision == 2:
                 assert response["code"] == "interim_limit"
         socket.send_json({"type": "stop"})
+        with pytest.raises(WebSocketDisconnect) as closed:
+            socket.receive_json()
+        assert closed.value.code == 1000
     assert ws_harness.ws_service.transcribe.await_count == 1
 
 
@@ -165,6 +171,9 @@ def test_interim_interval_limit_does_not_block_final_audio(ws_harness: AuthHarne
         assert socket.receive_json()["type"] == "processing"
         assert socket.receive_json()["type"] == "result"
         socket.send_json({"type": "stop"})
+        with pytest.raises(WebSocketDisconnect) as closed:
+            socket.receive_json()
+        assert closed.value.code == 1000
     assert ws_harness.ws_service.transcribe.await_count == 2
 
 
@@ -191,6 +200,9 @@ def test_interim_provider_timeout_is_safe_and_final_can_continue(ws_harness: Aut
         assert socket.receive_json()["type"] == "processing"
         assert socket.receive_json()["type"] == "result"
         socket.send_json({"type": "stop"})
+        with pytest.raises(WebSocketDisconnect) as closed:
+            socket.receive_json()
+        assert closed.value.code == 1000
 
 
 def test_stop_cancels_interim_provider_call(ws_harness: AuthHarness) -> None:
@@ -232,6 +244,9 @@ def test_interim_provider_rate_limit_does_not_translate_preview(ws_harness: Auth
         assert response["code"] == "provider_unavailable"
         assert "private" not in response["message"]
         socket.send_json({"type": "stop"})
+        with pytest.raises(WebSocketDisconnect) as closed:
+            socket.receive_json()
+        assert closed.value.code == 1000
     ws_harness.ws_service.translate.assert_not_awaited()
 
 
@@ -321,6 +336,9 @@ def test_websocket_accepts_each_target_language(ws_harness: AuthHarness, target_
         assert ready["type"] == "ready"
         assert ready["target_language"] == target_language
         socket.send_json({"type": "stop"})
+        with pytest.raises(WebSocketDisconnect) as closed:
+            socket.receive_json()
+        assert closed.value.code == 1000
 
 
 def test_unauthenticated_and_url_token_rejected(auth_harness: AuthHarness) -> None:
@@ -371,6 +389,9 @@ def test_pipeline_debug_timings_do_not_log_speech(ws_harness: AuthHarness, caplo
             assert socket.receive_json()["type"] == "processing"
             assert socket.receive_json()["type"] == "result"
             socket.send_json({"type": "stop"})
+            with pytest.raises(WebSocketDisconnect) as closed:
+                socket.receive_json()
+            assert closed.value.code == 1000
     messages = "\n".join(record.getMessage() for record in caplog.records if record.name == "app.ws.translate")
     assert "WebSocket audio accepted chunk_id=1" in messages
     assert "WebSocket result sent chunk_id=1" in messages
