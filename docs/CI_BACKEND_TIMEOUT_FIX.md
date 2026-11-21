@@ -14,7 +14,7 @@ A separate cancellation regression was reproduced with a focused test: `_cancel_
 - The isolated SQLite fixture now creates its schema and disposes its engine on the TestClient portal loop. That removes an additional cross-loop lifecycle risk, although loop alignment alone did not eliminate the stranded task while tests still skipped the close handshake.
 - `_cancel_interim()` preserves parent cancellation while still awaiting and cancelling interim transcription.
 - A regression test proves parent cancellation is propagated.
-- Temporary task diagnostics are enabled only by `TALKBUDDY_TASK_DEBUG=1` in the review branch's CI run. They report task names and stack locations without private content. Remove the flag and fixture instrumentation after the final Linux verification.
+- Temporary task diagnostics reported task names and stack locations without private content. They were removed after identifying the Linux blocker and verifying the cleanup change.
 
 Authentication, Origin checks, rate limits, final phrase processing, TTS ordering, and the interim-caption protocol are unchanged.
 
@@ -23,7 +23,7 @@ Authentication, Origin checks, rate limits, final phrase processing, TTS orderin
 - Windows, Python 3.11.9: `python -u -m pytest tests/test_websocket.py -q -s --timeout=90 --timeout-method=thread` with task diagnostics — **59 passed**, zero pending SQLite close tasks at fixture teardown.
 - Windows, Python 3.11.9: `python -m pytest -q --timeout=90 --timeout-method=thread` — **255 passed, 2 skipped** on each of two consecutive runs. One existing Starlette `httpx` deprecation warning remains.
 - Linux reproduction was attempted through WSL, but the installed `docker-desktop` distribution could not start (`HCS_E_SERVICE_NOT_AVAILABLE`); Docker and a separate Linux distribution were unavailable. No Linux run with the fix has been observed yet.
-- The first two hosted review-branch runs still failed; one supplied the decisive task snapshot. A new run containing the close-handshake changes for all affected tests is required before treating CI as fixed.
+- Linux GitHub Actions review-branch run [44925642093](https://github.com/vedddev/Tallkbuddy/actions/runs/44925642093) passed the backend job: **255 passed, 2 skipped, 1 warning in 24.96 seconds**. Its Alembic offline SQL step also passed, as did frontend and desktop jobs. A final run without temporary diagnostics is still required after their removal.
 
 To verify on Linux or GitHub Actions, run from `backend/`:
 

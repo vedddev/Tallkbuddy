@@ -22,8 +22,6 @@ jobs:
       - run: python -m pip check
       - run: python -m compileall -q app alembic
       - run: python -u -m pytest -vv --timeout=90 --timeout-method=thread
-        env:
-          TALKBUDDY_TASK_DEBUG: '1'
       - name: Verify Alembic SQL can render offline
         run: python -m alembic upgrade head --sql > "$RUNNER_TEMP/talkbuddy-migrations.sql"
         env:
