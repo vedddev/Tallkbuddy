@@ -23,7 +23,8 @@ Authentication, Origin checks, rate limits, final phrase processing, TTS orderin
 - Windows, Python 3.11.9: `python -u -m pytest tests/test_websocket.py -q -s --timeout=90 --timeout-method=thread` with task diagnostics — **59 passed**, zero pending SQLite close tasks at fixture teardown.
 - Windows, Python 3.11.9: `python -m pytest -q --timeout=90 --timeout-method=thread` — **255 passed, 2 skipped** on each of two consecutive runs. One existing Starlette `httpx` deprecation warning remains.
 - Linux reproduction was attempted through WSL, but the installed `docker-desktop` distribution could not start (`HCS_E_SERVICE_NOT_AVAILABLE`); Docker and a separate Linux distribution were unavailable. No Linux run with the fix has been observed yet.
-- Linux GitHub Actions review-branch run [44925642093](https://github.com/vedddev/Tallkbuddy/actions/runs/44925642093) passed the backend job: **255 passed, 2 skipped, 1 warning in 24.96 seconds**. Its Alembic offline SQL step also passed, as did frontend and desktop jobs. A final run without temporary diagnostics is still required after their removal.
+- Linux GitHub Actions review-branch run [44925642093](https://github.com/vedddev/Tallkbuddy/actions/runs/44925642093) passed the backend job: **255 passed, 2 skipped, 1 warning in 24.96 seconds**. Its Alembic offline SQL step, frontend, and desktop jobs also passed.
+- The final Linux run [44925883166](https://github.com/vedddev/Tallkbuddy/actions/runs/44925883166), after removing all temporary task tracing, also passed: **255 passed, 2 skipped, 1 warning in 20.12 seconds**. Backend, frontend, desktop, and Alembic offline SQL jobs completed successfully. These are two consecutive successful full Linux CI runs of the cleanup fix.
 
 To verify on Linux or GitHub Actions, run from `backend/`:
 
@@ -33,4 +34,4 @@ python -m pytest -vv --timeout=90 --timeout-method=thread
 python -m pytest -vv --timeout=90 --timeout-method=thread
 ```
 
-Check that `test_interim_disabled_by_default_never_calls_provider` and fixture teardown complete promptly, with no timeout or pending task warnings. The final acceptance criterion is a successful hosted backend job on a commit containing this fix.
+The affected interim-caption tests and fixture teardown completed promptly in both hosted runs. The diagnostic Windows WebSocket suite reported zero pending SQLite close tasks at fixture teardown. Linux had no per-task snapshot after the fix because the subsequent runs did not stall; the hosted backend jobs completed successfully.
