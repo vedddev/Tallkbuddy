@@ -1,6 +1,8 @@
 """Authentication API tests with a fresh, isolated database per test."""
 
 import asyncio
+import os
+import sys
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 
@@ -71,6 +73,28 @@ def auth_harness() -> Iterator[AuthHarness]:
     application.dependency_overrides[get_db_session] = isolated_session
     with TestClient(application) as client:
         yield AuthHarness(client, maker)
+        if os.getenv("TALKBUDDY_TASK_DEBUG") == "1":
+            def snapshot(stage: str) -> None:
+                loop = asyncio.get_running_loop()
+                tasks = asyncio.all_tasks(loop)
+                active = sum(application.state.websocket_connections._counts.values())
+                print(f"[task-debug] {stage} active_ws={active} task_count={len(tasks)}", file=sys.stderr, flush=True)
+                for task in tasks:
+                    coroutine = task.get_coro()
+                    name = getattr(coroutine, "__qualname__", type(coroutine).__name__)
+                    if "BlockingPortal" in name or "start_blocking_portal" in name:
+                        continue
+                    frames = [f"{frame.f_code.co_filename}:{frame.f_lineno}:{frame.f_code.co_name}" for frame in task.get_stack(limit=4)]
+                    print(f"[task-debug] name={task.get_name()} coro={name} cancelling={task.cancelling()} stack={frames}", file=sys.stderr, flush=True)
+
+            def schedule_snapshots() -> None:
+                loop = asyncio.get_running_loop()
+                snapshot("before TestClient exit")
+                for delay in (3, 10):
+                    loop.call_later(delay, snapshot, f"TestClient exit +{delay}s")
+
+            print("[task-debug] fixture teardown boundary", file=sys.stderr, flush=True)
+            client.portal.call(schedule_snapshots)
 
     application.dependency_overrides.clear()
     asyncio.run(engine.dispose())
