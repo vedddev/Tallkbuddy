@@ -54,7 +54,6 @@ def auth_harness() -> Iterator[AuthHarness]:
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
 
-    asyncio.run(create_schema())
     maker = async_sessionmaker(engine, expire_on_commit=False)
     application = create_app(
         Settings(app_env="test", auth_login_rate_limit=20, auth_register_rate_limit=20)
@@ -70,10 +69,14 @@ def auth_harness() -> Iterator[AuthHarness]:
 
     application.dependency_overrides[get_db_session] = isolated_session
     with TestClient(application) as client:
+        # Keep the SQLite connection on TestClient's portal loop for its full
+        # lifetime. Cross-loop setup/disposal can strand aiosqlite close tasks
+        # when the portal shuts down on Linux.
+        client.portal.call(create_schema)
         yield AuthHarness(client, maker)
+        client.portal.call(engine.dispose)
 
     application.dependency_overrides.clear()
-    asyncio.run(engine.dispose())
 
 
 def test_registration_persists_argon2id_hash_and_hides_it(auth_harness: AuthHarness) -> None:
