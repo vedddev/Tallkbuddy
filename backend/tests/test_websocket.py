@@ -23,12 +23,34 @@ from app.ai.service import AINoSpeechError, AIProviderFailure, AIProviderTimeout
 from app.db.models import UserSession
 from app.ws.protocol import InterimAudioMessage, ReadyMessage, ResultMessage
 from app.ws.audio import InvalidAudioChunk, validate_interim_wav
-from app.ws.translate import _send
+from app.ws.translate import _cancel_interim, _send
 from tests.test_auth import AuthHarness, auth_harness  # noqa: F401 - isolated DB fixture
 
 
 ORIGIN = {"origin": "http://testserver"}
 START = {"type": "start", "target_language": "fr", "audio_format": "wav"}
+
+
+def test_cancel_interim_preserves_parent_cancellation() -> None:
+    async def exercise() -> None:
+        entered_cleanup = asyncio.Event()
+
+        async def child() -> None:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                entered_cleanup.set()
+                await asyncio.Event().wait()
+
+        child_task = asyncio.create_task(child(), name="test-interim-child")
+        await asyncio.sleep(0)
+        parent = asyncio.create_task(_cancel_interim(child_task), name="test-websocket-parent")
+        await entered_cleanup.wait()
+        parent.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await parent
+
+    asyncio.run(exercise())
 
 
 def wav_chunk() -> bytes:
@@ -76,6 +98,9 @@ def test_interim_disabled_by_default_never_calls_provider(ws_harness: AuthHarnes
         assert socket.receive_json()["code"] == "interim_unavailable"
         socket.send_bytes(interim_wav())
         socket.send_json({"type": "stop"})
+        with pytest.raises(WebSocketDisconnect) as closed:
+            socket.receive_json()
+        assert closed.value.code == 1000
     ws_harness.ws_service.transcribe.assert_not_awaited()
 
 

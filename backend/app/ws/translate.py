@@ -4,7 +4,7 @@ import asyncio
 import base64
 import json
 import logging
-from contextlib import AsyncExitStack, suppress
+from contextlib import AsyncExitStack
 from time import perf_counter
 from uuid import UUID, uuid4
 
@@ -128,8 +128,14 @@ async def _active_user_id(db: AsyncSession, token: str) -> UUID | None:
 async def _cancel_interim(task: asyncio.Task[None] | None) -> None:
     if task is not None and not task.done():
         task.cancel()
-        with suppress(asyncio.CancelledError):
+        try:
             await task
+        except asyncio.CancelledError:
+            # The child is expected to be cancelled; cancellation of this
+            # WebSocket handler itself must still reach its caller.
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
 
 
 async def _process_interim(
