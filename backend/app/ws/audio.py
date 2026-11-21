@@ -30,3 +30,13 @@ def validate_wav_chunk(data: bytes, max_bytes: int) -> None:
                 raise InvalidAudioChunk("Incomplete WAV frames")
     except (EOFError, wave.Error) as exc:
         raise InvalidAudioChunk("Invalid WAV audio") from exc
+
+
+def validate_interim_wav(data: bytes, max_bytes: int) -> None:
+    """Interim snapshots must be short, complete 16 kHz mono PCM16 WAV files."""
+    validate_wav_chunk(data, max_bytes)
+    with wave.open(io.BytesIO(data), "rb") as audio:
+        if (audio.getnchannels(), audio.getsampwidth(), audio.getframerate()) != (1, 2, 16_000):
+            raise InvalidAudioChunk("Unsupported interim WAV format")
+        if not 8_000 <= audio.getnframes() <= 16_000 * 8:
+            raise InvalidAudioChunk("Interim WAV duration is out of range")

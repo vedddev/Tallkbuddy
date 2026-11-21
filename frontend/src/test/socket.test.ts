@@ -23,6 +23,40 @@ class FakeWebSocket {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('translation socket protocol', () => {
+  it('keeps interim WAVs best-effort, separate from the final queue, and disabled on old servers', async () => {
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const onMessage = vi.fn()
+    const socket = new TranslationSocket({ onMessage, onClose: vi.fn(), onDrop: vi.fn() })
+    const config = { source_language: 'auto' as const, target_language: 'hi' as const, save_history: false, interim_captions: true }
+    let connected = socket.connect(config)
+    let transport = FakeWebSocket.instance
+    transport.open()
+    expect(JSON.parse(transport.sent[0] as string).interim_captions).toBe(true)
+    transport.receive({ type: 'ready', target_language: 'hi', source_language: null, audio_format: 'wav' })
+    await connected
+    expect(socket.interimAvailable()).toBe(false)
+    expect(socket.sendInterim(new ArrayBuffer(44), crypto.randomUUID(), 1)).toBe(false)
+    connected = socket.connect(config)
+    transport = FakeWebSocket.instance
+    transport.open()
+    transport.receive({ type: 'ready', target_language: 'hi', source_language: null, audio_format: 'wav', interim_captions: true })
+    await connected
+    const phraseId = crypto.randomUUID()
+    expect(socket.sendInterim(new ArrayBuffer(44), phraseId, 1)).toBe(true)
+    expect(socket.sendInterim(new ArrayBuffer(44), phraseId, 2)).toBe(false)
+    expect(JSON.parse(transport.sent[1] as string)).toEqual({ type: 'interim_audio', phrase_id: phraseId, revision: 1, audio_format: 'wav' })
+    expect(transport.sent[2]).toBeInstanceOf(ArrayBuffer)
+    expect(socket.queueDepth()).toBe(0)
+    transport.receive({ type: 'interim_caption', phrase_id: phraseId, revision: 1, text: 'Hello', is_final: false })
+    expect(onMessage).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'interim_caption', text: 'Hello' }))
+    expect(socket.sendInterim(new ArrayBuffer(44), phraseId, 2)).toBe(true)
+    socket.cancelInterim()
+    expect(JSON.parse(transport.sent.at(-1) as string)).toEqual({ type: 'interim_cancel', phrase_id: phraseId })
+    socket.close()
+    onMessage.mockClear()
+    transport.receive({ type: 'interim_caption', phrase_id: phraseId, revision: 2, text: 'Late', is_final: false })
+    expect(onMessage).not.toHaveBeenCalled()
+  })
   it('cancels an in-flight phrase immediately without replaying queued audio', async () => {
     vi.stubGlobal('WebSocket', FakeWebSocket)
     const changes: number[] = []

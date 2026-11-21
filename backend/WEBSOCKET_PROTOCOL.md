@@ -1,8 +1,8 @@
 # TalkBuddy WebSocket translation protocol (Phases 5–6)
 
-The endpoint is `WS /ws/translate`. It processes one complete audio file per binary message, in arrival order. This is chunked request/response translation, not continuous audio streaming.
+The endpoint is `WS /ws/translate`. It processes finalized complete audio files in arrival order. This is chunked request/response translation, not continuous audio streaming. Experimental interim captions use additional complete WAV snapshots and do not change final result ordering.
 
-The React local meeting listener uses this existing protocol. Browser tab capture requires user approval through `getDisplayMedia`; an `AudioWorklet` detects pauses and encodes each complete phrase as an independent PCM WAV message. The backend still handles one message at a time and returns a result only after transcription and translation finish. It does not receive video frames or inject translated speech into the meeting. Browser `speechSynthesis` performs ordered, local playback. See [frontend meeting setup and limits](../frontend/README.md#local-meeting-listener).
+The React local meeting listener uses this existing protocol. Browser tab capture requires user approval through `getDisplayMedia`; an `AudioWorklet` detects pauses and encodes each complete phrase as an independent PCM WAV message. The backend handles finalized phrases sequentially and returns a result only after transcription and translation finish. It does not receive video frames or inject translated speech into the meeting. Browser `speechSynthesis` performs ordered, local playback. See [frontend meeting setup and limits](../frontend/README.md#local-meeting-listener).
 
 ## Authentication and handshake
 
@@ -61,6 +61,20 @@ The decoded audio is 24 kHz, mono, 16-bit PCM WAV, capped at `TTS_MAX_AUDIO_BYTE
 
 ## Server messages
 
+### Experimental interim captions (Phase 19)
+
+Interim captions are **disabled by default** and require both backend `WS_INTERIM_ENABLED=true` and frontend `VITE_INTERIM_CAPTIONS_ENABLED=true`. The user must also check **Experimental interim captions** before starting a browser session. The client adds `"interim_captions":true` to `start`; the server replies with `"interim_captions":true` in `ready` only when enabled. If requested but unavailable, `ready` contains `false` and the client continues with final captions only. Existing clients that omit the option receive the original `ready` shape.
+
+For each active phrase snapshot, send a JSON header immediately followed by one complete binary 16 kHz, mono, 16-bit PCM WAV. No base64 audio is placed in JSON:
+
+```json
+{"type":"interim_audio","phrase_id":"PHRASE_UUID","revision":1,"audio_format":"wav"}
+```
+
+The response is either `{"type":"interim_caption","phrase_id":"PHRASE_UUID","revision":1,"text":"Today we are","is_final":false,"detected_language":"en"}` or `{"type":"interim_error","phrase_id":"PHRASE_UUID","revision":1,"code":"provider_timeout","message":"Interim transcription timed out; final captions continue"}`. The client replaces prior revisions for the same phrase and ignores stale or post-final responses. To cancel an active preview, send `{"type":"interim_cancel","phrase_id":"PHRASE_UUID"}`. Final binary WAV messages keep the existing protocol and cancel an in-flight interim task before final processing. Interim audio and captions are never translated, spoken, saved, or exported.
+
+The browser sends at most four cumulative snapshots per phrase, nominally 1.8 seconds apart (configurable between 1.5 and 5 seconds). The backend accepts at most 50 interim requests per connection by default, at least 1.5 seconds apart, with at most one in flight; each snapshot is at most 256,000 bytes and 0.5–8 seconds, and processing times out after 8 seconds. `WS_INTERIM_*` settings can adjust these bounds. Rejected previews produce `interim_error` and do not interrupt final caption processing. Every accepted snapshot is another Groq Whisper request and may incur charges; the feature stays off until real-device and cost verification. This is periodic transcription, not native streaming STT.
+
 After valid `start`:
 
 ```json
@@ -81,7 +95,7 @@ For each valid binary chunk, the server sends `processing`, followed by `result`
 
 If STT succeeds but translation fails, `error` may also include `chunk_id`, `original`, `detected_language`, and `language_detection_source`. The browser can keep the original caption while showing that translation is unavailable. These fields are omitted for errors that occur before transcription.
 
-The browser keeps a local UUID for each completed phrase and associates it with the server's per-connection `chunk_id` through its single in-flight request. Local UUIDs are not sent or persisted. `chunk_id` restarts on a new connection. On disconnect, unsent and in-flight phrases are discarded instead of replayed; exactly-once processing cannot be inferred from a dropped connection. Saved-history `request_id` remains the existing server-side idempotency key for explicitly opted-in text history.
+The browser keeps a UUID for each completed phrase and associates it with the server's per-connection `chunk_id` through its single in-flight final request. With interim captions enabled, the UUID is sent as `phrase_id` for preview correlation; it is not persisted. `chunk_id` restarts on a new connection. On disconnect, unsent and in-flight phrases are discarded instead of replayed; exactly-once processing cannot be inferred from a dropped connection. Saved-history `request_id` remains the existing server-side idempotency key for explicitly opted-in text history.
 
 New results include `transcription_time_ms` and `translation_time_ms`, measured around the corresponding provider service calls. `processing_time_ms` includes those calls, database checks, and optional history saving. These are server-side measurements; clients should measure from sending a binary chunk to receiving its result for their own total response latency. Retried results served from history omit the provider timings. The configured provider semaphore limits concurrent Groq calls across REST and WebSocket requests in one process.
 

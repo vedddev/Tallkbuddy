@@ -9,6 +9,7 @@ export interface SocketConfig {
   session_id?: string
   synthesize_speech?: boolean
   allow_speech_fallback?: boolean
+  interim_captions?: boolean
 }
 
 interface Callbacks {
@@ -32,17 +33,21 @@ export class TranslationSocket {
   private config: SocketConfig | null = null
   private intentionalClose = false
   private speechFallbackUsed = false
+  private interimEnabled = false
+  private interimInFlight: { phraseId: string; revision: number } | null = null
 
   constructor(private callbacks: Callbacks) {}
 
   isOpen(): boolean { return this.socket?.readyState === WebSocket.OPEN }
   queueDepth(): number { return this.queued.length + Number(this.inflight) }
   usedSpeechFallback(): boolean { return this.speechFallbackUsed }
+  interimAvailable(): boolean { return this.interimEnabled }
   private reportQueue(): void { this.callbacks.onQueueChange?.(this.queueDepth()) }
 
   async connect(config: SocketConfig): Promise<void> {
     this.close()
     this.speechFallbackUsed = false
+    this.interimEnabled = false
     this.config = config
     this.intentionalClose = false
     const socket = new WebSocket(socketUrl())
@@ -62,6 +67,7 @@ export class TranslationSocket {
           ...(config.source_language === 'auto' ? {} : { source_language: config.source_language }),
           audio_format: 'wav', save_history: config.save_history,
           ...(speech ? { synthesize_speech: true } : {}),
+          ...(config.interim_captions ? { interim_captions: true } : {}),
           ...(config.save_history ? { session_id: config.session_id } : {}),
         }))
       }
@@ -84,7 +90,14 @@ export class TranslationSocket {
           return
         }
         if (message.type === 'ready') {
+          this.interimEnabled = Boolean(config.interim_captions && message.interim_captions)
           if (!settled) { settled = true; window.clearTimeout(timeout); resolve() }
+        }
+        if (message.type === 'interim_caption' || message.type === 'interim_error') {
+          if (this.interimInFlight?.phraseId === message.phrase_id && this.interimInFlight.revision === message.revision) this.interimInFlight = null
+          if (message.type === 'interim_error' && ['interim_limit', 'interim_rate_limit', 'interim_unavailable'].includes(message.code)) this.interimEnabled = false
+          this.callbacks.onMessage(message)
+          return
         }
         let timing: SocketRoundTripTiming | undefined
         if ((message.type === 'result' || (message.type === 'error' && Boolean(message.original))) && this.inFlightTiming) {
@@ -110,6 +123,7 @@ export class TranslationSocket {
         if (!isCurrent) return
         this.inflight = false
         this.inFlightTiming = null
+        this.interimInFlight = null
         // Queued phrases were never submitted and must not be replayed after reconnect.
         for (const _item of this.queued) this.callbacks.onDrop()
         this.queued = []
@@ -122,6 +136,7 @@ export class TranslationSocket {
 
   sendAudio(wav: ArrayBuffer, capture?: CaptureTiming): boolean {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN || !this.config) return false
+    if (capture?.phraseId === this.interimInFlight?.phraseId) this.interimInFlight = null
     if (this.inflight) {
       if (this.queued.length >= 3) { this.callbacks.onDrop(); return false }
       this.queued.push({ wav, capture })
@@ -146,6 +161,32 @@ export class TranslationSocket {
     }
   }
 
+  /** Best-effort preview. Never queued or replayed; a final phrase has priority. */
+  sendInterim(wav: ArrayBuffer, phraseId: string, revision: number): boolean {
+    if (!this.interimEnabled || !this.socket || this.socket.readyState !== WebSocket.OPEN ||
+        this.inflight || this.queued.length > 0 || this.interimInFlight ||
+        wav.byteLength > 256_000 || this.socket.bufferedAmount > 512_000) return false
+    try {
+      this.interimInFlight = { phraseId, revision }
+      this.socket.send(JSON.stringify({ type: 'interim_audio', phrase_id: phraseId, revision, audio_format: 'wav' }))
+      this.socket.send(wav)
+      return true
+    } catch {
+      this.interimInFlight = null
+      this.socket.close()
+      return false
+    }
+  }
+
+  cancelInterim(): void {
+    const pending = this.interimInFlight
+    this.interimInFlight = null
+    if (pending && this.socket?.readyState === WebSocket.OPEN) {
+      try { this.socket.send(JSON.stringify({ type: 'interim_cancel', phrase_id: pending.phraseId })) }
+      catch { this.socket.close() }
+    }
+  }
+
   private flush(): void {
     if (this.queued.length) {
       const next = this.queued.shift()!
@@ -162,11 +203,13 @@ export class TranslationSocket {
 
   close(): void {
     this.intentionalClose = true
+    this.interimEnabled = false
     this.socket?.close()
     this.socket = null
     this.queued = []
     this.inflight = false
     this.inFlightTiming = null
+    this.interimInFlight = null
     this.reportQueue()
   }
 }

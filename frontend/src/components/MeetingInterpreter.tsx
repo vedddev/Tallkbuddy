@@ -19,6 +19,8 @@ import type { Language, Preferences, SocketMessage, SourceLanguage } from '../li
 
 type Result = Extract<SocketMessage, { type: 'result' }>
 type TimedResult = Result & { receivedAt: number; displayId: number; exportEntry: TranscriptEntry; translationFailed?: boolean }
+type InterimCaption = { phraseId: string; revision: number; text: string; detectedLanguage: string | null }
+const interimFeatureAvailable = () => import.meta.env.VITE_INTERIM_CAPTIONS_ENABLED === 'true'
 type Status = 'idle' | 'permission' | 'shared' | 'connecting' | 'listening' | 'paused' | 'reconnecting' | 'stopping' | 'disconnected' | 'error'
 
 interface Props {
@@ -53,9 +55,9 @@ function socketErrorMessage(message: Extract<SocketMessage, { type: 'error' }>):
   return message.message
 }
 
-function PhrasePanel({ title, icon, results, field, empty, pending, language }: {
+function PhrasePanel({ title, icon, results, field, empty, pending, language, interim }: {
   title: string; icon: React.ReactNode; results: TimedResult[]; field: 'original' | 'translated';
-  empty: string; pending: boolean; language?: string
+  empty: string; pending: boolean; language?: string; interim?: InterimCaption | null
 }) {
   const scrollRef = useRef<HTMLOListElement>(null)
   const followRef = useRef(true)
@@ -72,7 +74,8 @@ function PhrasePanel({ title, icon, results, field, empty, pending, language }: 
       {results.length ? results.map((item) => <li key={item.displayId} className="min-w-0 rounded-lg border border-line bg-raised/50 p-3.5">
         <div className="mb-2 flex items-center justify-between gap-2 text-[11px] text-muted"><span>Completed phrase {item.chunk_id}{field === 'original' ? ` · ${detectedLanguageLabel(item.detected_language, item.language_detection_source)}` : ''}</span><time dateTime={new Date(item.receivedAt).toISOString()} title="Received by TalkBuddy">Received {phraseTime(item.receivedAt)}</time></div>
         <p lang={field === 'translated' ? languageByCode(item.target_language).speech_tag : detectedLanguageTag(item.detected_language)} className="whitespace-pre-wrap break-words text-sm leading-7 text-foreground sm:text-base">{field === 'translated' && item.translationFailed ? 'Translation unavailable for this phrase.' : item[field]}</p>
-      </li>) : <li className="flex min-h-[220px] flex-col items-center justify-center gap-3 text-center"><span className="grid h-11 w-11 place-items-center rounded-lg bg-raised text-muted">{icon}</span><p className="max-w-xs text-sm leading-6 text-muted">{empty}</p></li>}
+      </li>) : !interim && <li className="flex min-h-[220px] flex-col items-center justify-center gap-3 text-center"><span className="grid h-11 w-11 place-items-center rounded-lg bg-raised text-muted">{icon}</span><p className="max-w-xs text-sm leading-6 text-muted">{empty}</p></li>}
+      {field === 'original' && interim && <li aria-label="Provisional caption" aria-live="off" className="min-w-0 rounded-lg border border-accent/40 bg-raised/30 p-3.5"><span className="text-[11px] font-medium text-accent">Interim · Listening · {detectedLanguageLabel(interim.detectedLanguage, interim.detectedLanguage ? 'stt' : 'unknown')}</span><p lang={detectedLanguageTag(interim.detectedLanguage)} className="mt-2 whitespace-pre-wrap break-words text-sm leading-7 text-foreground sm:text-base">{interim.text}</p></li>}
       {pending && <li role="status" className="text-xs text-muted">Processing a complete phrase…</li>}
     </ol>
   </Card>
@@ -82,6 +85,8 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
   const [source, setSource] = useState<SourceLanguage>('auto')
   const [target, setTarget] = useState<Language>('hi')
   const [saveHistory, setSaveHistory] = useState(false)
+  const [interimRequested, setInterimRequested] = useState(false)
+  const [interim, setInterim] = useState<InterimCaption | null>(null)
   const [muteOriginal, setMuteOriginal] = useState(false)
   const [muteTranslated, setMuteTranslated] = useState(false)
   const [speechProvider, setSpeechProvider] = useState<SpeechProvider>('captions')
@@ -126,6 +131,8 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
   const seenResultsRef = useRef(new Set<number>())
   const playbackSequenceRef = useRef(0)
   const displaySequenceRef = useRef(0)
+  const activeInterimPhraseRef = useRef<string | null>(null)
+  const finalizedPhraseIdsRef = useRef(new Set<string>())
 
   useEffect(() => {
     if (status !== 'idle' || !preferences) return
@@ -175,6 +182,8 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
     setStatus('stopping')
     setActivity(0)
     setProcessing(false)
+    setInterim(null)
+    activeInterimPhraseRef.current = null
     const capture = captureRef.current
     captureRef.current = null
     await capture?.stop().catch(() => undefined)
@@ -200,11 +209,26 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
     const socket = new TranslationSocket({
       onMessage: (message, timing) => {
         if (generation !== generationRef.current || !mountedRef.current || !startedRef.current) return
+        if (message.type === 'interim_caption') {
+          if (message.phrase_id !== activeInterimPhraseRef.current || finalizedPhraseIdsRef.current.has(message.phrase_id)) return
+          setInterim((current) => current?.phraseId === message.phrase_id && current.revision >= message.revision
+            ? current : { phraseId: message.phrase_id, revision: message.revision, text: message.text, detectedLanguage: message.detected_language || null })
+          return
+        }
+        if (message.type === 'interim_error') {
+          if (message.phrase_id !== activeInterimPhraseRef.current) return
+          setInterim((current) => current?.phraseId === message.phrase_id && current.revision <= message.revision ? null : current)
+          if (['interim_limit', 'interim_rate_limit', 'interim_unavailable', 'provider_timeout', 'provider_unavailable'].includes(message.code)) setNotice('Interim captions paused; finalized captions continue.')
+          return
+        }
         if (message.type === 'processing') setProcessing(true)
         if (message.type === 'result') {
           setProcessing(false)
           if (seenResultsRef.current.has(message.chunk_id)) return
           seenResultsRef.current.add(message.chunk_id)
+          const phraseId = timing?.capture?.phraseId
+          if (phraseId) { finalizedPhraseIdsRef.current.add(phraseId); if (finalizedPhraseIdsRef.current.size > 100) finalizedPhraseIdsRef.current.delete(finalizedPhraseIdsRef.current.values().next().value!) }
+          setInterim((current) => !phraseId || current?.phraseId === phraseId ? null : current)
           const displayId = ++displaySequenceRef.current
           const session = exportSessionRef.current
           if (session) {
@@ -234,8 +258,13 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
         if (message.type === 'error') {
           if (message.code === 'speech_unavailable') { speechRef.current?.disableAzure(); return }
           setProcessing(false)
+          setInterim(null)
           setProcessingErrors((count) => count + 1)
           setError(socketErrorMessage(message))
+          if (timing?.capture?.phraseId) {
+            finalizedPhraseIdsRef.current.add(timing.capture.phraseId)
+            setInterim((current) => current?.phraseId === timing.capture?.phraseId ? null : current)
+          }
           if (message.original && message.chunk_id && !seenResultsRef.current.has(message.chunk_id)) {
             seenResultsRef.current.add(message.chunk_id)
             const displayId = ++displaySequenceRef.current
@@ -265,6 +294,8 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
         if (generation !== generationRef.current || !startedRef.current || reconnectingRef.current) return
         setWebsocketDisconnects((count) => count + 1)
         captureRef.current?.pause()
+        setInterim(null)
+        activeInterimPhraseRef.current = null
         speechRef.current?.pause()
         setActivity(0)
         setProcessing(false)
@@ -274,8 +305,9 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
       },
     })
     socketRef.current = socket
-    await socket.connect({ source_language: source, target_language: target, save_history: saveHistory, session_id: sessionIdRef.current || undefined, synthesize_speech: true, allow_speech_fallback: true })
+    await socket.connect({ source_language: source, target_language: target, save_history: saveHistory, session_id: sessionIdRef.current || undefined, synthesize_speech: true, allow_speech_fallback: true, interim_captions: interimRequested })
     if (socket.usedSpeechFallback()) speechRef.current?.disableAzure()
+    if (interimRequested && !socket.interimAvailable()) setNotice('Interim captions are unavailable on this server; finalized captions continue.')
   }
 
   const reconnect = async (generation: number) => {
@@ -321,22 +353,30 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
       const socket = socketRef.current
       if (!socket?.isOpen()) { setDroppedPhrases((count) => count + 1); setNotice('A phrase was skipped while reconnecting.') }
       else if (socket.sendAudio(wav, captureTiming)) setPhraseCount((count) => count + 1)
+      else setInterim(null)
+    }
+    const onInterim = (wav: ArrayBuffer, phraseId: string, revision: number): boolean => {
+      if (generation !== generationRef.current || !mountedRef.current || !startedRef.current) return false
+      const sent = socketRef.current?.sendInterim(wav, phraseId, revision) ?? false
+      if (sent) activeInterimPhraseRef.current = phraseId
+      return sent
     }
     const onEnded = () => { if (generation === generationRef.current) { setNotice(mode === 'meeting' ? 'Tab sharing ended.' : 'Microphone disconnected.'); void stop(false) } }
-    const onDrop = () => { if (generation === generationRef.current && mountedRef.current) { setDroppedPhrases((count) => count + 1); setNotice('A long uninterrupted phrase had no safe boundary and was skipped.') } }
+    const onDrop = () => { if (generation === generationRef.current && mountedRef.current) { socketRef.current?.cancelInterim(); setInterim(null); activeInterimPhraseRef.current = null; setDroppedPhrases((count) => count + 1); setNotice('A long uninterrupted phrase had no safe boundary and was skipped.') } }
     const onActivity = (level: number) => { if (generation === generationRef.current && mountedRef.current) setActivity(level) }
     const onDroppedSamples = (count: number, discardedPhrase: boolean, overflowEvents: number) => {
       if (generation !== generationRef.current || !mountedRef.current) return
       setDroppedSamples((value) => value + count)
       setBufferOverflows((value) => value + overflowEvents)
       if (discardedPhrase) setDroppedPhrases((value) => value + 1)
+      if (discardedPhrase) { socketRef.current?.cancelInterim(); setInterim(null); activeInterimPhraseRef.current = null }
       setNotice(discardedPhrase
         ? 'Audio capture fell behind. A partial phrase was discarded; try closing busy tabs.'
         : 'Audio capture fell behind during silence; try closing busy tabs.')
     }
     const capture = mode === 'meeting' ? await startMeetingCapture(
-      onChunk, onEnded, onDrop, muteOriginal, onActivity, onDroppedSamples,
-    ) : await startMicrophoneCapture(onChunk, onEnded, onDrop, deviceId || undefined, onActivity, onDroppedSamples)
+      onChunk, onEnded, onDrop, muteOriginal, onActivity, onDroppedSamples, ...(interimRequested ? [onInterim] : []),
+    ) : await startMicrophoneCapture(onChunk, onEnded, onDrop, deviceId || undefined, onActivity, onDroppedSamples, ...(interimRequested ? [onInterim] : []))
     if (generation !== generationRef.current || !mountedRef.current) { await capture.stop(); return null }
     captureRef.current = capture
     onActiveChange(true)
@@ -371,6 +411,9 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
     seenResultsRef.current.clear()
     playbackSequenceRef.current = 0
     displaySequenceRef.current = 0
+    finalizedPhraseIdsRef.current.clear()
+    activeInterimPhraseRef.current = null
+    setInterim(null)
     exportCountRef.current = 0
     setExportTruncated(0)
     const localSession: TranscriptSession = { id: crypto.randomUUID(), startedAt: new Date().toISOString(), sourceLanguage: source, targetLanguage: target }
@@ -413,6 +456,9 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
     if (status === 'listening') {
       pausedRef.current = true
       captureRef.current?.pause()
+      socketRef.current?.cancelInterim()
+      setInterim(null)
+      activeInterimPhraseRef.current = null
       speechRef.current?.pause()
       setActivity(0)
       setStatus('paused')
@@ -456,7 +502,8 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
       {interpreting && <p className="mt-2 text-xs text-muted">Stop the session to change languages.</p>}
       {!voiceAvailable && <p className="mt-2 text-xs text-[var(--color-warning)]">A compatible browser voice is unavailable. If Azure is also unavailable, translated captions will continue without speech.</p>}
       <div className="mt-5 grid gap-3 sm:grid-cols-2">{mode === 'meeting' && <label className="flex items-start gap-2 rounded-md border border-line p-3 text-sm"><input type="checkbox" checked={muteOriginal} disabled={Boolean(captureRef.current && !captureRef.current.originalMuteSupported)} onChange={(event) => void toggleOriginalMute(event.target.checked)} className="mt-0.5 accent-accent" /><span><span className="block font-medium">Mute original tab audio</span><span className="block text-xs leading-5 text-muted">Available only when your browser supports it.</span></span></label>}<label className="flex items-start gap-2 rounded-md border border-line p-3 text-sm"><input type="checkbox" checked={saveHistory} disabled={interpreting || !preferences?.save_history_enabled} onChange={(event) => setSaveHistory(event.target.checked)} className="mt-0.5 accent-accent" /><span><span className="block font-medium">Save translated text</span><span className="block text-xs leading-5 text-muted">Off by default. {preferences?.save_history_enabled ? 'Opt in for this session.' : <>Enable in <Link className="text-accent underline" to="/settings">Settings</Link> first.</>}</span></span></label><label className="flex items-start gap-2 rounded-md border border-line p-3 text-sm"><input type="checkbox" checked={muteTranslated} onChange={(event) => { setMuteTranslated(event.target.checked); if (event.target.checked) speechRef.current?.mute(); else if (status === 'listening') speechRef.current?.resume() }} className="mt-0.5 accent-accent" /><span><span className="block font-medium">Mute translated speech</span><span className="block text-xs leading-5 text-muted">Captions continue; queued speech stops.</span></span></label></div>
-      <div className="mt-5 flex flex-wrap gap-2">{mode === 'meeting' && <Button type="button" onClick={() => void shareTab()} disabled={sessionActive || microphoneActive} className="w-full sm:w-auto"><Radio size={16} />Share browser tab with audio</Button>}<Button type="button" variant="primary" onClick={() => void start()} disabled={!['idle', 'error', 'disconnected', 'shared'].includes(status) || (mode === 'meeting' && microphoneActive)} className="w-full sm:w-auto"><Headphones size={16} />Start interpretation</Button><Button type="button" onClick={togglePause} disabled={status !== 'listening' && status !== 'paused'} className="flex-1 sm:flex-none">{status === 'paused' ? <Play size={16} /> : <Pause size={16} />}{status === 'paused' ? 'Resume' : 'Pause'}</Button><Button type="button" onClick={() => void stop()} disabled={!sessionActive || status === 'stopping'} className="flex-1 sm:flex-none"><Square size={15} />Stop session</Button><Button type="button" onClick={() => { setResults([]); setTimings([]); exportCountRef.current = 0; setExportTruncated(0) }} disabled={!results.length} className="w-full sm:w-auto">Clear captions</Button></div>
+      {interimFeatureAvailable() && <label className="mt-3 flex items-start gap-2 rounded-md border border-line p-3 text-sm"><input type="checkbox" checked={interimRequested} disabled={sessionActive} onChange={(event) => setInterimRequested(event.target.checked)} className="mt-0.5 accent-accent" /><span><span className="block font-medium">Experimental interim captions</span><span className="block text-xs leading-5 text-muted">Off by default. Extra Whisper requests increase API usage; provisional text may change. Final captions remain authoritative.</span></span></label>}
+      <div className="mt-5 flex flex-wrap gap-2">{mode === 'meeting' && <Button type="button" onClick={() => void shareTab()} disabled={sessionActive || microphoneActive} className="w-full sm:w-auto"><Radio size={16} />Share browser tab with audio</Button>}<Button type="button" variant="primary" onClick={() => void start()} disabled={!['idle', 'error', 'disconnected', 'shared'].includes(status) || (mode === 'meeting' && microphoneActive)} className="w-full sm:w-auto"><Headphones size={16} />Start interpretation</Button><Button type="button" onClick={togglePause} disabled={status !== 'listening' && status !== 'paused'} className="flex-1 sm:flex-none">{status === 'paused' ? <Play size={16} /> : <Pause size={16} />}{status === 'paused' ? 'Resume' : 'Pause'}</Button><Button type="button" onClick={() => void stop()} disabled={!sessionActive || status === 'stopping'} className="flex-1 sm:flex-none"><Square size={15} />Stop session</Button><Button type="button" onClick={() => { setResults([]); setInterim(null); activeInterimPhraseRef.current = null; socketRef.current?.cancelInterim(); setTimings([]); exportCountRef.current = 0; setExportTruncated(0) }} disabled={!results.length && !interim} className="w-full sm:w-auto">Clear captions</Button></div>
       <p className="mt-3 text-xs leading-5 text-muted">{mode === 'meeting' ? 'Choose a browser tab and enable “Share tab audio” in the permission prompt. TalkBuddy cannot capture another tab without your approval.' : 'Choose a microphone above, then press Start to request permission. Use headphones to reduce feedback.'} Audio is processed but not saved by default.</p>
       <div className="mt-4 flex flex-wrap items-center gap-4 border-t border-line pt-4 text-xs text-muted"><span className="flex items-center gap-2"><AudioLines size={15} />Audio activity</span><div role="meter" aria-label="Captured audio activity" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(activity * 100)} className="h-1.5 w-32 overflow-hidden rounded-full bg-raised"><div className="h-full rounded-full bg-accent transition-[width] duration-150" style={{ width: `${Math.round(activity * 100)}%` }} /></div><span>{activity > 0 && status === 'listening' ? 'Audio detected' : status === 'paused' ? 'Paused' : 'Waiting for audio'}</span><span className="flex items-center gap-1.5 sm:ml-auto">{playback === 'playing' ? <Volume2 size={15} /> : <VolumeX size={15} />}{muteTranslated ? 'Translated speech muted' : playback === 'playing' ? `Playing ${speechProvider} speech${queuedSpeech ? ` · ${queuedSpeech} queued` : ''}` : playback === 'paused' ? 'Playback paused' : voiceAvailable ? 'Playback idle' : 'Captions only if Azure is unavailable'}</span></div>
     </Card>
@@ -464,7 +511,7 @@ export function MeetingInterpreter({ preferences, microphoneActive, onActiveChan
     <LatencyDiagnostics records={timings} connection={websocketStatus} capture={statusLabel} inputLevel={activity} capturedPhrases={capturedPhrases} phraseCount={phraseCount} processing={processing} processingErrors={processingErrors} droppedPhrases={droppedPhrases} droppedSamples={droppedSamples} bufferOverflows={bufferOverflows} websocketDisconnects={websocketDisconnects} playbackFailures={playbackFailures} queueDepth={queueDepth} playbackQueueDepth={queuedSpeech} onReset={() => { setTimings([]); setCapturedPhrases(0); setPhraseCount(0); setProcessingErrors(0); setDroppedPhrases(0); setDroppedSamples(0); setBufferOverflows(0); setWebsocketDisconnects(0); setPlaybackFailures(0) }} />
     {notice && <p role="status" className="rounded-lg border border-[var(--color-warning)] bg-[var(--color-warning-surface)] px-4 py-3 text-sm text-[var(--color-warning)]">{notice}</p>}
     {error && <ErrorMessage message={error} />}
-    <div className="grid min-w-0 gap-4 md:grid-cols-2"><PhrasePanel title="Original speech" icon={<Captions size={17} className="text-muted" />} results={results.slice(-30)} field="original" empty="Completed spoken phrases will appear here after transcription." pending={processing} /><PhrasePanel title="Translated speech" icon={<Volume2 size={17} className="text-accent" />} results={results.slice(-30)} field="translated" empty="Translated captions will appear here. Playback requires a compatible browser voice." pending={processing} language={targetName} /></div>
+    <div className="grid min-w-0 gap-4 md:grid-cols-2"><PhrasePanel title="Original speech" icon={<Captions size={17} className="text-muted" />} results={results.slice(-30)} field="original" empty="Completed spoken phrases will appear here after transcription." pending={processing} interim={interim} /><PhrasePanel title="Translated speech" icon={<Volume2 size={17} className="text-accent" />} results={results.slice(-30)} field="translated" empty="Translated captions will appear here. Playback requires a compatible browser voice." pending={processing} language={targetName} /></div>
     {mode === 'meeting' && <TranscriptExportControls session={exportSession} entries={exportEntries} truncated={exportTruncated} />}
   </section>
 }

@@ -3,6 +3,8 @@ import type { CaptureTiming } from './latency'
 
 const OUTPUT_RATE = 16_000
 const MAX_WAV_BYTES = 1_000_000
+const MAX_INTERIM_WAV_BYTES = 256_000
+const MAX_INTERIM_SNAPSHOTS = 4
 
 export interface VadOptions {
   onsetMs: number
@@ -39,6 +41,9 @@ export class PhraseSegmenter {
   private active = false
   private speechStartAtMs: number | null = null
   private lastBlockCapturedAtMs: number | null = null
+  private activePhraseId: string | null = null
+  private interimRevision = 0
+  private lastInterimSamples = 0
   private options: VadOptions
 
   constructor(
@@ -46,7 +51,12 @@ export class PhraseSegmenter {
     private onPhrase: (samples: Float32Array, timing: CaptureTiming) => void,
     private onDrop: () => void = () => undefined,
     options: Partial<VadOptions> = {},
-  ) { this.options = vadOptions(options) }
+    private onInterim?: (samples: Float32Array, phraseId: string, revision: number) => boolean,
+    private interimIntervalMs = 1800,
+  ) {
+    this.options = vadOptions(options)
+    if (!Number.isFinite(interimIntervalMs) || interimIntervalMs < 1500 || interimIntervalMs > 5000) throw new Error('Invalid interim interval')
+  }
 
   push(block: Float32Array, capturedAtMs = performance.now()): void {
     if (!block.length) return
@@ -67,6 +77,7 @@ export class PhraseSegmenter {
       this.candidateSamples = voiced ? this.candidateSamples + block.length : 0
       if (this.candidateSamples < this.sampleRate * this.options.onsetMs / 1000) return
       this.active = true
+      this.activePhraseId = crypto.randomUUID()
       this.speechStartAtMs = capturedAtMs - this.candidateSamples / this.sampleRate * 1000
       this.segment = this.preroll
       this.segmentSamples = this.prerollSamples
@@ -84,6 +95,16 @@ export class PhraseSegmenter {
       this.trailingSilence = 0
     } else {
       this.trailingSilence += block.length
+    }
+    if (voiced && this.onInterim && this.activePhraseId && this.interimRevision < MAX_INTERIM_SNAPSHOTS &&
+        this.segmentSamples / this.sampleRate * 1000 >= (this.interimRevision + 1) * this.interimIntervalMs &&
+        this.segmentSamples - this.lastInterimSamples >= this.sampleRate * this.interimIntervalMs / 1000 &&
+        this.segmentSamples <= this.sampleRate * 8) {
+      const snapshot = new Float32Array(this.segmentSamples)
+      let offset = 0
+      for (const part of this.segment) { snapshot.set(part, offset); offset += part.length }
+      this.lastInterimSamples = this.segmentSamples
+      if (this.onInterim(snapshot, this.activePhraseId, this.interimRevision + 1)) this.interimRevision += 1
     }
     if (this.trailingSilence >= this.sampleRate * this.options.endingSilenceMs / 1000) {
       this.finish()
@@ -105,6 +126,9 @@ export class PhraseSegmenter {
     this.active = false
     this.speechStartAtMs = null
     this.lastBlockCapturedAtMs = null
+    this.activePhraseId = null
+    this.interimRevision = 0
+    this.lastInterimSamples = 0
   }
 
   hasActivePhrase(): boolean { return this.active }
@@ -116,6 +140,7 @@ export class PhraseSegmenter {
     const speechEndAtMs = (this.lastBlockCapturedAtMs ?? performance.now()) - this.trailingSilence / this.sampleRate * 1000
     const keep = Math.min(this.segmentSamples, this.segmentSamples - this.trailingSilence + Math.floor(this.sampleRate * this.options.trailingPaddingMs / 1000))
     const speechStartAtMs = this.speechStartAtMs
+    const phraseId = this.activePhraseId
     const joined = new Float32Array(keep)
     let cursor = 0
     for (const block of this.segment) {
@@ -125,7 +150,7 @@ export class PhraseSegmenter {
       cursor += take
     }
     this.reset()
-    this.onPhrase(joined, { speechEndAtMs, speechStartAtMs, captureDurationMs: joined.length / this.sampleRate * 1000 })
+    this.onPhrase(joined, { speechEndAtMs, speechStartAtMs, captureDurationMs: joined.length / this.sampleRate * 1000, phraseId: phraseId ?? undefined })
   }
 }
 
@@ -144,8 +169,9 @@ export async function startMeetingCapture(
   muteOriginal: boolean,
   onActivity?: (level: number) => void,
   onDroppedSamples?: (count: number, discardedPhrase: boolean, overflowEvents: number) => void,
+  onInterim?: (wav: ArrayBuffer, phraseId: string, revision: number) => boolean,
 ): Promise<MeetingCapture> {
-  return startPhraseCapture('meeting', onChunk, onEnded, onDrop, muteOriginal, onActivity, undefined, onDroppedSamples)
+  return startPhraseCapture('meeting', onChunk, onEnded, onDrop, muteOriginal, onActivity, undefined, onDroppedSamples, onInterim)
 }
 
 export async function startMicrophoneCapture(
@@ -155,8 +181,9 @@ export async function startMicrophoneCapture(
   deviceId?: string,
   onActivity?: (level: number) => void,
   onDroppedSamples?: (count: number, discardedPhrase: boolean, overflowEvents: number) => void,
+  onInterim?: (wav: ArrayBuffer, phraseId: string, revision: number) => boolean,
 ): Promise<MeetingCapture> {
-  return startPhraseCapture('microphone', onChunk, onEnded, onDrop, false, onActivity, deviceId, onDroppedSamples)
+  return startPhraseCapture('microphone', onChunk, onEnded, onDrop, false, onActivity, deviceId, onDroppedSamples, onInterim)
 }
 
 async function startPhraseCapture(
@@ -168,6 +195,7 @@ async function startPhraseCapture(
   onActivity?: (level: number) => void,
   deviceId?: string,
   onDroppedSamples?: (count: number, discardedPhrase: boolean, overflowEvents: number) => void,
+  onInterim?: (wav: ArrayBuffer, phraseId: string, revision: number) => boolean,
 ): Promise<MeetingCapture> {
   if (mode === 'meeting' && !navigator.mediaDevices?.getDisplayMedia) throw new Error('Tab audio capture is unavailable in this browser or context.')
   if (mode === 'microphone' && !navigator.mediaDevices?.getUserMedia) throw new Error('Microphone capture is unavailable in this browser or context.')
@@ -218,10 +246,13 @@ async function startPhraseCapture(
       const wav = encodePcmWav(samples, context!.sampleRate, OUTPUT_RATE)
       if (wav.byteLength <= MAX_WAV_BYTES) onChunk(wav, {
         ...timing, captureStartedAtMs, encodingMs: Math.max(0, performance.now() - encodingStartedAtMs),
-        phraseEncodedAtMs: performance.now(), phraseId: crypto.randomUUID(),
+        phraseEncodedAtMs: performance.now(), phraseId: timing.phraseId ?? crypto.randomUUID(),
       })
       else onDrop()
-    }, onDrop)
+    }, onDrop, {}, onInterim ? (samples, phraseId, revision) => {
+      const wav = encodePcmWav(samples, context!.sampleRate, OUTPUT_RATE)
+      return wav.byteLength <= MAX_INTERIM_WAV_BYTES && onInterim(wav, phraseId, revision)
+    } : undefined, Math.max(1500, Math.min(5000, Number(import.meta.env.VITE_INTERIM_INTERVAL_MS) || 1800)))
     moduleUrl = URL.createObjectURL(new Blob([captureWorkletCode], { type: 'text/javascript' }))
     await context.audioWorklet.addModule(moduleUrl)
     source = context.createMediaStreamSource(stream)

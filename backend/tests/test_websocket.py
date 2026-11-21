@@ -4,6 +4,7 @@ import asyncio
 import base64
 import io
 import logging
+import threading
 import wave
 from time import perf_counter
 from contextlib import asynccontextmanager
@@ -18,9 +19,10 @@ from starlette.websockets import WebSocketDisconnect
 
 from app.ai.languages import LANGUAGE_NAMES
 from app.ai.schemas import TranscriptionResponse, TranslationResponse
-from app.ai.service import AINoSpeechError, AIProviderFailure, AIProviderTimeout
+from app.ai.service import AINoSpeechError, AIProviderFailure, AIProviderTimeout, AIProviderUnavailable
 from app.db.models import UserSession
-from app.ws.protocol import ResultMessage
+from app.ws.protocol import InterimAudioMessage, ReadyMessage, ResultMessage
+from app.ws.audio import InvalidAudioChunk, validate_interim_wav
 from app.ws.translate import _send
 from tests.test_auth import AuthHarness, auth_harness  # noqa: F401 - isolated DB fixture
 
@@ -37,6 +39,175 @@ def wav_chunk() -> bytes:
         file.setframerate(16000)
         file.writeframes(b"\x01\x00" * 1600)
     return buffer.getvalue()
+
+
+def interim_wav() -> bytes:
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as file:
+        file.setnchannels(1)
+        file.setsampwidth(2)
+        file.setframerate(16000)
+        file.writeframes(b"\x01\x00" * 16000)
+    return buffer.getvalue()
+
+
+def test_interim_metadata_and_wav_validation() -> None:
+    from pydantic import ValidationError
+
+    phrase_id = "f2d7e257-4174-4512-beb4-9fcc7df57e64"
+    assert InterimAudioMessage.model_validate({
+        "type": "interim_audio", "phrase_id": phrase_id, "revision": 1, "audio_format": "wav",
+    }).revision == 1
+    with pytest.raises(ValidationError):
+        InterimAudioMessage.model_validate({
+            "type": "interim_audio", "phrase_id": phrase_id, "revision": 0, "audio_format": "wav",
+        })
+    validate_interim_wav(interim_wav(), 256_000)
+    with pytest.raises(InvalidAudioChunk):
+        validate_interim_wav(wav_chunk(), 256_000)
+
+
+def test_interim_disabled_by_default_never_calls_provider(ws_harness: AuthHarness) -> None:
+    phrase_id = "f2d7e257-4174-4512-beb4-9fcc7df57e64"
+    with ws_harness.client.websocket_connect("/ws/translate", headers=ORIGIN) as socket:
+        socket.send_json({**START, "interim_captions": True})
+        assert socket.receive_json()["interim_captions"] is False
+        socket.send_json({"type": "interim_audio", "phrase_id": phrase_id, "revision": 1, "audio_format": "wav"})
+        assert socket.receive_json()["code"] == "interim_unavailable"
+        socket.send_bytes(interim_wav())
+        socket.send_json({"type": "stop"})
+    ws_harness.ws_service.transcribe.assert_not_awaited()
+
+
+@pytest.mark.parametrize("detected", ["en", "hi", "mr"])
+def test_interim_caption_is_provisional_and_final_pipeline_unchanged(ws_harness: AuthHarness, detected: str) -> None:
+    ws_harness.client.app.state.settings.ws_interim_enabled = True
+    ws_harness.ws_service.transcribe.return_value = TranscriptionResponse(text="Hello", detected_language=detected)
+    phrase_id = "f2d7e257-4174-4512-beb4-9fcc7df57e64"
+    with ws_harness.client.websocket_connect("/ws/translate", headers=ORIGIN) as socket:
+        socket.send_json({**START, "interim_captions": True})
+        assert socket.receive_json()["interim_captions"] is True
+        socket.send_json({"type": "interim_audio", "phrase_id": phrase_id, "revision": 1, "audio_format": "wav"})
+        socket.send_bytes(interim_wav())
+        interim = socket.receive_json()
+        assert interim == {"type": "interim_caption", "phrase_id": phrase_id, "revision": 1,
+                           "text": "Hello", "is_final": False, "detected_language": detected}
+        socket.send_bytes(wav_chunk())
+        assert socket.receive_json()["type"] == "processing"
+        assert socket.receive_json()["type"] == "result"
+        socket.send_json({"type": "stop"})
+    assert ws_harness.ws_service.transcribe.await_count == 2
+    assert ws_harness.ws_service.transcribe.await_args_list[0].args == (interim_wav(), "interim.wav")
+    ws_harness.ws_service.translate.assert_awaited_once()
+
+
+def test_interim_rate_and_request_limits(ws_harness: AuthHarness) -> None:
+    settings = ws_harness.client.app.state.settings
+    settings.ws_interim_enabled = True
+    settings.ws_interim_min_interval_seconds = 10
+    settings.ws_interim_max_requests = 1
+    phrase_id = "f2d7e257-4174-4512-beb4-9fcc7df57e64"
+    with ws_harness.client.websocket_connect("/ws/translate", headers=ORIGIN) as socket:
+        socket.send_json({**START, "interim_captions": True})
+        socket.receive_json()
+        for revision in (1, 2):
+            socket.send_json({"type": "interim_audio", "phrase_id": phrase_id, "revision": revision, "audio_format": "wav"})
+            socket.send_bytes(interim_wav())
+            response = socket.receive_json()
+            assert response["type"] == ("interim_caption" if revision == 1 else "interim_error")
+            if revision == 2:
+                assert response["code"] == "interim_limit"
+        socket.send_json({"type": "stop"})
+    assert ws_harness.ws_service.transcribe.await_count == 1
+
+
+def test_interim_interval_limit_does_not_block_final_audio(ws_harness: AuthHarness) -> None:
+    settings = ws_harness.client.app.state.settings
+    settings.ws_interim_enabled = True
+    settings.ws_interim_min_interval_seconds = 10
+    phrase_id = "f2d7e257-4174-4512-beb4-9fcc7df57e64"
+    with ws_harness.client.websocket_connect("/ws/translate", headers=ORIGIN) as socket:
+        socket.send_json({**START, "interim_captions": True})
+        socket.receive_json()
+        for revision in (1, 2):
+            socket.send_json({"type": "interim_audio", "phrase_id": phrase_id, "revision": revision, "audio_format": "wav"})
+            socket.send_bytes(interim_wav())
+            response = socket.receive_json()
+            assert response["type"] == ("interim_caption" if revision == 1 else "interim_error")
+            if revision == 2:
+                assert response["code"] == "interim_rate_limit"
+        socket.send_bytes(wav_chunk())
+        assert socket.receive_json()["type"] == "processing"
+        assert socket.receive_json()["type"] == "result"
+        socket.send_json({"type": "stop"})
+    assert ws_harness.ws_service.transcribe.await_count == 2
+
+
+def test_interim_provider_timeout_is_safe_and_final_can_continue(ws_harness: AuthHarness) -> None:
+    settings = ws_harness.client.app.state.settings
+    settings.ws_interim_enabled = True
+    settings.ws_interim_timeout_seconds = 1
+    phrase_id = "f2d7e257-4174-4512-beb4-9fcc7df57e64"
+    async def slow_then_normal(*args):
+        if args[1] == "interim.wav":
+            await asyncio.sleep(2)
+        return TranscriptionResponse(text="Hello", detected_language="en")
+    ws_harness.ws_service.transcribe.side_effect = slow_then_normal
+    with ws_harness.client.websocket_connect("/ws/translate", headers=ORIGIN) as socket:
+        socket.send_json({**START, "interim_captions": True})
+        socket.receive_json()
+        socket.send_json({"type": "interim_audio", "phrase_id": phrase_id, "revision": 1, "audio_format": "wav"})
+        socket.send_bytes(interim_wav())
+        response = socket.receive_json()
+        assert response["type"] == "interim_error"
+        assert response["code"] == "provider_timeout"
+        assert "internal" not in response["message"]
+        socket.send_bytes(wav_chunk())
+        assert socket.receive_json()["type"] == "processing"
+        assert socket.receive_json()["type"] == "result"
+        socket.send_json({"type": "stop"})
+
+
+def test_stop_cancels_interim_provider_call(ws_harness: AuthHarness) -> None:
+    ws_harness.client.app.state.settings.ws_interim_enabled = True
+    started = threading.Event()
+    cancelled = threading.Event()
+    async def slow_transcription(*_args):
+        started.set()
+        try:
+            await asyncio.sleep(20)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+    ws_harness.ws_service.transcribe.side_effect = slow_transcription
+    phrase_id = "f2d7e257-4174-4512-beb4-9fcc7df57e64"
+    with ws_harness.client.websocket_connect("/ws/translate", headers=ORIGIN) as socket:
+        socket.send_json({**START, "interim_captions": True})
+        socket.receive_json()
+        socket.send_json({"type": "interim_audio", "phrase_id": phrase_id, "revision": 1, "audio_format": "wav"})
+        socket.send_bytes(interim_wav())
+        assert started.wait(2)
+        socket.send_json({"type": "stop"})
+        with pytest.raises(WebSocketDisconnect):
+            socket.receive_json()
+    assert cancelled.wait(2)
+
+
+def test_interim_provider_rate_limit_does_not_translate_preview(ws_harness: AuthHarness) -> None:
+    ws_harness.client.app.state.settings.ws_interim_enabled = True
+    ws_harness.ws_service.transcribe.side_effect = AIProviderUnavailable("private provider details")
+    phrase_id = "f2d7e257-4174-4512-beb4-9fcc7df57e64"
+    with ws_harness.client.websocket_connect("/ws/translate", headers=ORIGIN) as socket:
+        socket.send_json({**START, "interim_captions": True})
+        socket.receive_json()
+        socket.send_json({"type": "interim_audio", "phrase_id": phrase_id, "revision": 1, "audio_format": "wav"})
+        socket.send_bytes(interim_wav())
+        response = socket.receive_json()
+        assert response["type"] == "interim_error"
+        assert response["code"] == "provider_unavailable"
+        assert "private" not in response["message"]
+        socket.send_json({"type": "stop"})
+    ws_harness.ws_service.translate.assert_not_awaited()
 
 
 def test_optional_timing_metadata_is_numeric_and_contains_no_diagnostics_secrets() -> None:
@@ -60,6 +231,22 @@ def test_optional_timing_metadata_is_numeric_and_contains_no_diagnostics_secrets
     retry_payload = websocket.send_json.await_args.args[0]
     assert "transcription_time_ms" not in retry_payload
     assert "translation_time_ms" not in retry_payload
+
+
+@pytest.mark.parametrize("interim_state", [None, False, True])
+def test_ready_serialization_preserves_legacy_null_and_explicit_interim_state(interim_state: bool | None) -> None:
+    websocket = SimpleNamespace(send_json=AsyncMock())
+    message = ReadyMessage(target_language="fr", source_language=None, interim_captions=interim_state)
+    assert asyncio.run(_send(websocket, message)) is True
+    payload = websocket.send_json.await_args.args[0]
+    assert payload["source_language"] is None
+    assert payload["target_language"] == "fr"
+    assert payload["audio_format"] == "wav"
+    if interim_state is None:
+        assert "interim_captions" not in payload
+        assert set(payload) == {"type", "target_language", "source_language", "audio_format"}
+    else:
+        assert payload["interim_captions"] is interim_state
 
 
 @pytest.fixture

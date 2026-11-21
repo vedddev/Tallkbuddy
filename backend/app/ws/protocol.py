@@ -18,6 +18,7 @@ class StartMessage(BaseModel):
     save_history: bool = False
     session_id: UUID | None = None
     synthesize_speech: bool = False
+    interim_captions: bool = False
 
     @field_validator("target_language")
     @classmethod
@@ -43,11 +44,51 @@ class ChunkMessage(BaseModel):
     request_id: UUID
 
 
+class InterimAudioMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["interim_audio"]
+    phrase_id: UUID
+    revision: int
+    audio_format: Literal["wav"]
+
+    @field_validator("revision")
+    @classmethod
+    def revision_is_bounded(cls, value: int) -> int:
+        if value < 1 or value > 100:
+            raise ValueError("Invalid interim revision")
+        return value
+
+
+class InterimCancelMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["interim_cancel"]
+    phrase_id: UUID
+
+
 class ReadyMessage(BaseModel):
     type: Literal["ready"] = "ready"
     target_language: str
     source_language: str | None
     audio_format: Literal["wav"] = "wav"
+    interim_captions: bool | None = None
+
+
+class InterimCaptionMessage(BaseModel):
+    type: Literal["interim_caption"] = "interim_caption"
+    phrase_id: UUID
+    revision: int
+    text: str
+    is_final: Literal[False] = False
+    detected_language: str | None = None
+
+
+class InterimErrorMessage(BaseModel):
+    type: Literal["interim_error"] = "interim_error"
+    phrase_id: UUID
+    revision: int
+    code: str
+    message: str
 
 
 class ProcessingMessage(BaseModel):

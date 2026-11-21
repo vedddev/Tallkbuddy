@@ -52,7 +52,9 @@ export interface SessionDetail {
 }
 
 export type SocketMessage =
-  | { type: 'ready'; target_language: Language; source_language: Language | null; audio_format: 'wav' }
+  | { type: 'ready'; target_language: Language; source_language: Language | null; audio_format: 'wav'; interim_captions?: boolean }
+  | { type: 'interim_caption'; phrase_id: string; revision: number; text: string; is_final: false; detected_language?: string | null }
+  | { type: 'interim_error'; phrase_id: string; revision: number; code: string; message: string }
   | { type: 'processing'; chunk_id: number }
   | {
       type: 'result'; chunk_id: number; original: string; translated: string

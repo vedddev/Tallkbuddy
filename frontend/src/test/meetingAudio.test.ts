@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PhraseSegmenter, startMeetingCapture, startMicrophoneCapture } from '../lib/meetingAudio'
+import { encodePcmWav } from '../lib/audio'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -8,6 +9,29 @@ function feed(segmenter: PhraseSegmenter, value: number, count: number) {
 }
 
 describe('meeting phrase segmentation', () => {
+  it('makes bounded complete-WAV interim snapshots for one active phrase and keeps the final phrase ID', () => {
+    const previews: { id: string; revision: number; wav: ArrayBuffer }[] = []
+    const finals: string[] = []
+    const segmenter = new PhraseSegmenter(1000, (_samples, timing) => finals.push(timing.phraseId!), vi.fn(), {}, (samples, id, revision) => {
+      previews.push({ id, revision, wav: encodePcmWav(samples, 1000) })
+      return true
+    })
+    feed(segmenter, 0.2, 80)
+    expect(previews.map((item) => item.revision)).toEqual([1, 2, 3, 4])
+    expect(new Set(previews.map((item) => item.id)).size).toBe(1)
+    for (const preview of previews) {
+      const view = new DataView(preview.wav)
+      expect(view.getUint32(0, true)).toBe(0x46464952) // RIFF
+      expect(view.getUint32(24, true)).toBe(16_000)
+      expect(view.getUint16(22, true)).toBe(1)
+      expect(preview.wav.byteLength).toBeLessThanOrEqual(256_000)
+    }
+    feed(segmenter, 0, 7)
+    expect(finals).toEqual([previews[0].id])
+    segmenter.reset()
+    feed(segmenter, 0, 30)
+    expect(previews).toHaveLength(4)
+  })
   it('waits for speech and a phrase-ending pause before sending complete audio', () => {
     const phrases: Float32Array[] = []
     const segmenter = new PhraseSegmenter(1000, (samples) => phrases.push(samples))

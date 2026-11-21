@@ -4,7 +4,7 @@ import asyncio
 import base64
 import json
 import logging
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, suppress
 from time import perf_counter
 from uuid import UUID, uuid4
 
@@ -39,11 +39,15 @@ from app.history.service import (
     require_saving_allowed,
     save_translation,
 )
-from app.ws.audio import InvalidAudioChunk, validate_wav_chunk
+from app.ws.audio import InvalidAudioChunk, validate_interim_wav, validate_wav_chunk
 from app.ws.limits import ConnectionRegistry
 from app.ws.protocol import (
     ChunkMessage,
     ErrorMessage,
+    InterimAudioMessage,
+    InterimCancelMessage,
+    InterimCaptionMessage,
+    InterimErrorMessage,
     ProcessingMessage,
     ReadyMessage,
     ResultMessage,
@@ -75,6 +79,8 @@ async def _send(websocket: WebSocket, message: BaseModel) -> bool:
             for field in ("chunk_id", "original", "detected_language", "language_detection_source"):
                 if payload[field] is None:
                     payload.pop(field)
+        if isinstance(message, ReadyMessage) and message.interim_captions is None:
+            payload.pop("interim_captions")
         await websocket.send_json(payload)
         return True
     except (WebSocketDisconnect, OSError, RuntimeError):
@@ -117,6 +123,60 @@ async def _active_user_id(db: AsyncSession, token: str) -> UUID | None:
         return active[1].id if active is not None else None
     finally:
         await db.rollback()
+
+
+async def _cancel_interim(task: asyncio.Task[None] | None) -> None:
+    if task is not None and not task.done():
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+async def _process_interim(
+    websocket: WebSocket, db: AsyncSession, auth_lock: asyncio.Lock,
+    token: str, user_id: UUID, service: AIService, start: StartMessage,
+    meta: InterimAudioMessage, audio: bytes, settings: Settings,
+) -> None:
+    try:
+        async with asyncio.timeout(settings.ws_interim_timeout_seconds):
+            if start.source_language:
+                transcription = await service.transcribe(audio, "interim.wav", start.source_language)
+            else:
+                transcription = await service.transcribe(audio, "interim.wav")
+        # The request-scoped DB session must never be used concurrently by two tasks.
+        async with auth_lock:
+            active = await _active_user_id(db, token) == user_id
+        if not active:
+            return
+        await _send(websocket, InterimCaptionMessage(
+            phrase_id=meta.phrase_id, revision=meta.revision,
+            text=transcription.text, detected_language=normalize_detected_language(transcription.detected_language),
+        ))
+    except asyncio.CancelledError:
+        raise
+    except (TimeoutError, AIProviderTimeout):
+        await _send(websocket, InterimErrorMessage(
+            phrase_id=meta.phrase_id, revision=meta.revision,
+            code="provider_timeout", message="Interim transcription timed out; final captions continue",
+        ))
+    except (AIProviderUnavailable, AIProviderFailure):
+        await _send(websocket, InterimErrorMessage(
+            phrase_id=meta.phrase_id, revision=meta.revision,
+            code="provider_unavailable", message="Interim transcription unavailable; final captions continue",
+        ))
+    except (AINoSpeechError, AIInputError):
+        await _send(websocket, InterimErrorMessage(
+            phrase_id=meta.phrase_id, revision=meta.revision,
+            code="no_speech", message="No clear interim speech; final captions continue",
+        ))
+    except SQLAlchemyError as exc:
+        logger.warning("Interim session check failed (%s)", type(exc).__name__)
+    except Exception as exc:
+        logger.warning("Interim transcription failed (%s)", type(exc).__name__)
+        await _send(websocket, InterimErrorMessage(
+            phrase_id=meta.phrase_id, revision=meta.revision,
+            code="provider_error", message="Interim transcription unavailable; final captions continue",
+        ))
 
 
 def _origin_allowed(websocket: WebSocket, settings: Settings) -> bool:
@@ -412,6 +472,8 @@ async def translate_websocket(
     metrics.increment("ws_connections")
     metrics.increment("ws_active")
     ws_context_token = websocket_id_context.set(uuid4().hex)
+    interim_task: asyncio.Task[None] | None = None
+    auth_lock = asyncio.Lock()
 
     try:
         await websocket.accept()
@@ -419,6 +481,11 @@ async def translate_websocket(
         service: AIService | None = None
         chunk_id = 0
         pending_request_id: UUID | None = None
+        pending_interim: InterimAudioMessage | None = None
+        discard_interim_binary = False
+        interim_count = 0
+        last_interim_at = -float("inf")
+        latest_interim_revision: dict[UUID, int] = {}
         async with AsyncExitStack() as stack:
             while True:
                 try:
@@ -435,7 +502,8 @@ async def translate_websocket(
                 if message["type"] == "websocket.disconnect":
                     return
                 try:
-                    active_user_id = await _active_user_id(db, token)
+                    async with auth_lock:
+                        active_user_id = await _active_user_id(db, token)
                 except Exception as exc:
                     logger.warning("WebSocket session check failed (%s)", type(exc).__name__)
                     await _error(websocket, "session_check_failed", "Session check failed", False)
@@ -468,6 +536,7 @@ async def translate_websocket(
                             if not await _error(websocket, "invalid_message", "Invalid stop message", True):
                                 return
                             continue
+                        await _cancel_interim(interim_task)
                         await _close(websocket, 1000)
                         return
                     if payload.get("type") == "start":
@@ -518,9 +587,51 @@ async def translate_websocket(
                             ReadyMessage(
                                 target_language=start.target_language,
                                 source_language=start.source_language,
+                                interim_captions=(settings.ws_interim_enabled if start.interim_captions else None),
                             ),
                         ):
                             return
+                        continue
+
+                    if payload.get("type") == "interim_audio":
+                        if pending_interim is not None or discard_interim_binary:
+                            if not await _error(websocket, "invalid_state", "Interim audio is pending", True):
+                                return
+                            continue
+                        try:
+                            meta = InterimAudioMessage.model_validate(payload)
+                        except ValidationError:
+                            pending_request_id = None
+                            discard_interim_binary = True
+                            if not await _error(websocket, "invalid_message", "Invalid interim metadata", True):
+                                return
+                            continue
+                        if start is None or not start.interim_captions or not settings.ws_interim_enabled or pending_request_id is not None:
+                            pending_request_id = None
+                            discard_interim_binary = True
+                            if not await _send(websocket, InterimErrorMessage(
+                                phrase_id=meta.phrase_id, revision=meta.revision,
+                                code="interim_unavailable", message="Interim captions unavailable; final captions continue",
+                            )):
+                                return
+                            continue
+                        pending_interim = meta
+                        continue
+
+                    if payload.get("type") == "interim_cancel":
+                        try:
+                            cancelled = InterimCancelMessage.model_validate(payload)
+                        except ValidationError:
+                            if not await _error(websocket, "invalid_message", "Invalid interim cancel message", True):
+                                return
+                            continue
+                        if pending_interim is not None and pending_interim.phrase_id == cancelled.phrase_id:
+                            pending_interim = None
+                            discard_interim_binary = True
+                        if cancelled.phrase_id in latest_interim_revision:
+                            await _cancel_interim(interim_task)
+                            interim_task = None
+                            latest_interim_revision.pop(cancelled.phrase_id, None)
                         continue
 
                     if payload.get("type") == "chunk":
@@ -547,10 +658,51 @@ async def translate_websocket(
                     if not await _error(websocket, "invalid_message", "Invalid message", True):
                         return
                     continue
+                if discard_interim_binary:
+                    discard_interim_binary = False
+                    continue
+                if pending_interim is not None:
+                    meta = pending_interim
+                    pending_interim = None
+                    code: str | None = None
+                    if len(audio) > settings.ws_interim_max_audio_bytes:
+                        code = "audio_too_large"
+                    else:
+                        try:
+                            validate_interim_wav(audio, settings.ws_interim_max_audio_bytes)
+                        except InvalidAudioChunk:
+                            code = "invalid_audio"
+                    if code is None and interim_count >= settings.ws_interim_max_requests:
+                        code = "interim_limit"
+                    if code is None and perf_counter() - last_interim_at < settings.ws_interim_min_interval_seconds:
+                        code = "interim_rate_limit"
+                    if code is None and interim_task is not None and not interim_task.done():
+                        code = "interim_busy"
+                    if code is None and meta.revision <= latest_interim_revision.get(meta.phrase_id, 0):
+                        code = "stale_revision"
+                    if code is not None:
+                        if not await _send(websocket, InterimErrorMessage(
+                            phrase_id=meta.phrase_id, revision=meta.revision,
+                            code=code, message="Interim caption skipped; final captions continue",
+                        )):
+                            return
+                        continue
+                    assert start is not None and service is not None
+                    interim_count += 1
+                    last_interim_at = perf_counter()
+                    latest_interim_revision[meta.phrase_id] = meta.revision
+                    # Only one snapshot runs at a time; final WAV cancels it before processing.
+                    interim_task = asyncio.create_task(_process_interim(
+                        websocket, db, auth_lock, token, user_id, service, start, meta, audio, settings,
+                    ))
+                    continue
                 if start is None or service is None:
                     if not await _error(websocket, "invalid_state", "Send start before audio", True):
                         return
                     continue
+                await _cancel_interim(interim_task)
+                interim_task = None
+                latest_interim_revision.clear()
                 if start.save_history and pending_request_id is None:
                     if not await _error(websocket, "missing_request_id", "Send chunk metadata before audio", True):
                         return
@@ -591,6 +743,7 @@ async def translate_websocket(
     except (WebSocketDisconnect, OSError, RuntimeError):
         return
     finally:
+        await _cancel_interim(interim_task)
         websocket_id_context.reset(ws_context_token)
         metrics.increment("ws_active", -1)
         await registry.release(user_id)

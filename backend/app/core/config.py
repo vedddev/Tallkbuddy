@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     ws_max_chunks: int = Field(default=100, ge=1, le=10000)
     ws_idle_timeout_seconds: float = Field(default=60.0, ge=1.0, le=3600.0)
     ws_processing_timeout_seconds: float = Field(default=120.0, ge=1.0, le=600.0)
+    ws_interim_enabled: bool = False
+    ws_interim_min_interval_seconds: float = Field(default=1.5, ge=1.0, le=10.0)
+    ws_interim_max_requests: int = Field(default=50, ge=1, le=500)
+    ws_interim_max_audio_bytes: int = Field(default=256_000, ge=16_000, le=1_000_000)
+    ws_interim_timeout_seconds: float = Field(default=8.0, ge=1.0, le=30.0)
 
     @property
     def cookie_secure(self) -> bool:

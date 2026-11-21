@@ -1,5 +1,7 @@
 # TalkBuddy backend
 
+Experimental interim captions are disabled by default. Set `WS_INTERIM_ENABLED=true` only for a controlled local test after reviewing Groq usage; each accepted preview is an additional Whisper request. The browser also requires `VITE_INTERIM_CAPTIONS_ENABLED=true` and user opt-in. `WS_INTERIM_MIN_INTERVAL_SECONDS`, `WS_INTERIM_MAX_REQUESTS`, `WS_INTERIM_MAX_AUDIO_BYTES`, and `WS_INTERIM_TIMEOUT_SECONDS` bound the preview path. Finalized translation, history, and TTS continue through the existing protocol. See [WebSocket protocol](WEBSOCKET_PROTOCOL.md#experimental-interim-captions-phase-19).
+
 Use Python 3.11+, PostgreSQL, and the repository's `shared/languages.json`. From `backend/`:
 
 ```powershell

@@ -20,6 +20,10 @@ npm.cmd run dev
 
 Open `http://127.0.0.1:5173`. `VITE_BACKEND_URL` is the Vite development proxy target (`http://127.0.0.1:8000` by default). The browser calls same-origin `/api` and `/ws` paths, so it can read the non-HTTP-only CSRF cookie while the session cookie stays HTTP-only. FastAPI accepts both `http://127.0.0.1:5173` and `http://localhost:5173` in development. Use the same hostname consistently in the browser. Restart FastAPI after changing its `.env`. `VITE_API_BASE_URL` is optional and should point to the same public origin as the frontend; a separate cross-site origin will not expose the CSRF cookie to the frontend.
 
+## Experimental interim captions
+
+Interim captions are off by default. To test them locally, set `WS_INTERIM_ENABLED=true` in the backend environment and `VITE_INTERIM_CAPTIONS_ENABLED=true` in the frontend environment, restart both services, then check **Experimental interim captions** before starting `/meeting` or `/microphone`. The browser sends at most four complete 16 kHz PCM WAV snapshots per active phrase, nominally 1.8 seconds apart; each accepted snapshot causes an additional Groq Whisper call. Backend limits cap the interval, bytes, duration, concurrent previews, and requests per connection. The UI labels this text as provisional and replaces it with the authoritative final phrase. Interim text is never translated, spoken, stored in history, or exported. If either flag is off, finalized captions continue as before. Do not enable this in production until real speech, cost, and provider rate-limit behavior have been measured.
+
 ## Build and test
 
 ```powershell

@@ -7,7 +7,57 @@ import { TranslationSocket } from '../lib/socket'
 import { languageRegistry } from '../lib/languageRegistry'
 import { reconnectDelayMs } from '../components/MeetingInterpreter'
 
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs() })
+
+it('replaces interim revisions with the final caption and excludes previews from exports', async () => {
+  vi.stubEnv('VITE_INTERIM_CAPTIONS_ENABLED', 'true')
+  let preview: Parameters<typeof meetingAudio.startMeetingCapture>[6]
+  let complete: Parameters<typeof meetingAudio.startMeetingCapture>[0] | undefined
+  vi.spyOn(meetingAudio, 'startMeetingCapture').mockImplementation(async (...args) => {
+    complete = args[0]
+    preview = args[6]
+    return { pause: vi.fn(), resume: vi.fn(), stop: vi.fn().mockResolvedValue(undefined), setOriginalMuted: vi.fn().mockResolvedValue(false), originalMuteSupported: false }
+  })
+  class FakeWebSocket {
+    static OPEN = 1
+    static latest: FakeWebSocket
+    readyState = 0
+    bufferedAmount = 0
+    sent: (string | ArrayBuffer)[] = []
+    onopen: (() => void) | null = null
+    onmessage: ((event: { data: string }) => void) | null = null
+    onclose: ((event: { code: number }) => void) | null = null
+    onerror: (() => void) | null = null
+    constructor(_url: string) { FakeWebSocket.latest = this }
+    send(value: string | ArrayBuffer) { this.sent.push(value) }
+    close() { this.readyState = 3; this.onclose?.({ code: 1000 }) }
+    open() { this.readyState = 1; this.onopen?.() }
+    receive(value: object) { this.onmessage?.({ data: JSON.stringify(value) }) }
+  }
+  vi.stubGlobal('WebSocket', FakeWebSocket)
+  render(<MemoryRouter><MeetingInterpreter preferences={null} microphoneActive={false} onActiveChange={vi.fn()} /></MemoryRouter>)
+  fireEvent.click(screen.getByLabelText(/Experimental interim captions/))
+  fireEvent.click(screen.getByRole('button', { name: 'Start interpretation' }))
+  await waitFor(() => expect(FakeWebSocket.latest).toBeDefined())
+  await act(async () => { FakeWebSocket.latest.open(); FakeWebSocket.latest.receive({ type: 'ready', target_language: 'hi', source_language: null, audio_format: 'wav', interim_captions: true }) })
+  const phraseId = crypto.randomUUID()
+  act(() => { expect(preview?.(new ArrayBuffer(44), phraseId, 1)).toBe(true) })
+  act(() => FakeWebSocket.latest.receive({ type: 'interim_caption', phrase_id: phraseId, revision: 1, text: 'Hel', is_final: false, detected_language: 'mr' }))
+  expect(screen.getByLabelText('Provisional caption')).toHaveTextContent('Hel')
+  expect(screen.getByLabelText('Provisional caption')).toHaveTextContent('Marathi')
+  expect(screen.getByRole('button', { name: 'Download TXT' })).toBeDisabled()
+  act(() => FakeWebSocket.latest.receive({ type: 'interim_caption', phrase_id: phraseId, revision: 0, text: 'Old', is_final: false }))
+  expect(screen.queryByText('Old')).not.toBeInTheDocument()
+  act(() => FakeWebSocket.latest.receive({ type: 'interim_caption', phrase_id: phraseId, revision: 2, text: 'Hello', is_final: false }))
+  expect(screen.getByLabelText('Provisional caption')).toHaveTextContent('Hello')
+  act(() => complete?.(new ArrayBuffer(44), { speechEndAtMs: 1200, captureDurationMs: 900, phraseId }))
+  act(() => FakeWebSocket.latest.receive({ type: 'result', chunk_id: 1, original: 'Hello everyone', translated: 'नमस्ते सभी को', detected_language: 'en', target_language: 'hi', processing_time_ms: 20 }))
+  expect(screen.queryByLabelText('Provisional caption')).not.toBeInTheDocument()
+  expect(screen.getByText('Hello everyone')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Download TXT' })).toBeEnabled()
+  act(() => FakeWebSocket.latest.receive({ type: 'interim_caption', phrase_id: phraseId, revision: 3, text: 'Late', is_final: false }))
+  expect(screen.queryByText('Late')).not.toBeInTheDocument()
+})
 
 it('bounds exponential reconnect delay with jitter', () => {
   expect(reconnectDelayMs(0, 0)).toBe(800)
